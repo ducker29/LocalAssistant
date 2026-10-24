@@ -1,0 +1,44 @@
+*.iml
+.gradle
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Local tooling
+.opencode/node_modules/
+
+# Signing secrets
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+keystore.properties
+signing.properties
+secrets.properties
+.env
+.env.*
+
+# Local models and user audio
+*.gguf
+*.ggml
+*.onnx
+*.tflite
+*.safetensors
+*.bin
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac

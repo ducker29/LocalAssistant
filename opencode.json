@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "bash": "allow",
+    "external_directory": "ask",
+    "skill": {
+      "*": "ask",
+      "project-handoff": "allow",
+      "android-kotlin-quality": "allow"
+    }
+  }
+}
