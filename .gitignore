@@ -30,7 +30,10 @@ secrets.properties
 .env.*
 
 # Local models and user audio
+/models/
+/third_party/_dl/
 *.gguf
+*.gguf.part
 *.ggml
 *.onnx
 *.tflite

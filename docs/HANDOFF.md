@@ -1,50 +1,73 @@
-# Передача работы следующей сессии
+# Передача контекста проекта
 
-## Где остановились
-M0: критерии приёмки по `docs/PLAN.md` (аудит; чистая сборка, тесты и lint) выполнены. Результаты `assembleDebug`, unit-тестов и lint от 2026-10-24 остаются действительными историческими результатами; в текущей сессии они не перезапускались. Установка и запуск APK не проверены (в критерии M0 не входят).
-Git инициализирован, `.gitignore` подготовлен; в этой сессии после сверки создаётся первый локальный коммит.
-2026-10-24 текущая сессия: статус-документы сверены с фактами; код, конфигурация и документы плана не менялись, кроме STATE.md и HANDOFF.md.
+## Состояние на 2026-10-24
+M1 закрыта, M2 почти закрыта: офлайн-чат на Qwen3-1.7B Q4_K_M работает на эмуляторе
+через собранный llama.cpp. Последние проверки: `assembleDebug` — успешно,
+`testDebugUnitTest` — 25 тестов без падений, `lintDebug` — 0 ошибок (21 warning).
+Подробности и ограничения — в `docs/STATE.md`.
 
-## Изменённые файлы
-- `.gitignore` — исключения для `node_modules`, секретов/подписи, моделей и аудио; удалён дубль `local.properties`.
-- `docs/STATE.md`, `docs/HANDOFF.md` — эта контрольная точка (2026-10-24).
-- Создан `.git/` (`git init`, ветка `master`) — ранее, не в текущей сессии.
-- Код, зависимости, версии, Manifest и нативная конфигурация не менялись.
+Инференс проверен вручную на эмуляторе: `Hello` → `Hello! How can I assist you today?`,
+история пережила перезапуск. Дополнительно проверены многоходовый контекст, «Стоп» до и
+во время генерации, генерация после отмены, «Новый чат», скачивание модели в приложении
+(SHA-256 сошёлся), импорт GGUF через SAF, генерация без сети. Подробная таблица
+PASS/NOT TESTED, методика замеров и инструкция для телефона:
+`docs/IMPLEMENTATION_REPORT.md`. На реальном телефоне не проверялось; APK на телефон
+не устанавливался.
 
-## Первая задача следующей сессии
-Проверить список кандидатов первого коммита и после отдельного подтверждения выполнить `git add` и `git commit`.
+## Как воспроизвести проверку на эмуляторе
+1. Сборка: `.\gradlew.bat :app:assembleDebug`.
+2. Установка: `adb install -r app\build\outputs\apk\debug\app-debug.apk`.
+3. Подготовка модели (веса в репозиторий не входят, `models/` в `.gitignore`):
+   - `adb push models\Qwen_Qwen3-1.7B-Q4_K_M.gguf.part /data/local/tmp/model.gguf`
+   - `adb shell "run-as com.example.localassistant mkdir -p files/models"`
+   - `adb shell "run-as com.example.localassistant cp /data/local/tmp/model.gguf files/models/model.gguf"`
+   - `adb shell "rm -f /data/local/tmp/model.gguf"`
+   - сверить SHA-256: `72c5c3cb38fa32d5256e2fe30d03e7a64c6c79e668ad84057e3bd66e250b24fb`.
+4. Запуск: `adb shell am start -n com.example.localassistant/.MainActivity`.
+5. Логи движка: `adb logcat | Select-String "LlmNative|LlamaEngine"`.
 
-## Конфигурация агента (перечитано 2026-10-24 перед коммитом)
-- Действует английский `AGENTS.md` из корня проекта.
-- `opencode.json`: `read: allow`, `edit: allow`, `bash: allow`, `external_directory: ask`; `permission.skill` с `ask` по умолчанию и `allow` для двух проектных skill — намеренно.
-- `bash: allow` объясняет выполнение команд без запроса подтверждения; `external_directory: ask` фактически не проверялся.
-- `project-handoff` и `android-kotlin-quality` обнаружены и загружены через native skill tool в текущей сессии.
+Emulator: `emulator-5554`, x86_64, API 37. Для 1.28-ГБ модели нужен запас RAM;
+эмулятор запускался с `-memory 6144`.
 
-## Факты для продолжения
-- Gradle Wrapper 9.6.0, JVM 25.0.3; AGP 9.4.1; compose-плагин Kotlin 2.2.10; Compose BOM 2026.02.01; catalog `gradle/libs.versions.toml`.
-- Модуль `:app`; package `com.example.localassistant`; minSdk 26, targetSdk 37, compileSdk 37; Java 11.
-- build-tools 36.0.0 достаточно для compileSdk 37.
-- Manifest без разрешений; NDK/CMake не используются.
-- SDK: platforms android-36 и android-37.0; AVD `Medium_Phone_API_37.0`; устройство не подключалось.
-- `opencode.json` без секретов (только `$schema` и `permission`).
-- `.opencode/.gitignore` исключает `node_modules`, `package.json`, `package-lock.json`, `bun.lock` и сам себя; `.opencode/skills/` попадает в Git.
-- Кандидаты первого коммита: 48 файлов; проверено отсутствие `build/`, `.gradle/`, `node_modules`, `local.properties`, моделей, аудио, keystore и секретов.
-- 2026-10-24 (текущая сессия): рабочий каталог совпадает с корнем репозитория; ветка `master`; коммитов и индекса нет; 48 untracked-файлов подтверждены повторно.
-- `git check-ignore -v` подтвердил исключения для `app/build/`, `/build`, `.gradle`, `.idea`, `local.properties`, `.opencode/node_modules`, `.opencode/package*.json`, а также шаблонов моделей, аудио, keystore, подписи и секретов.
-- `SETUP.md` содержит только инструкции по установке; секретов нет.
+## Доступные артефакты
+- `third_party/llama.cpp` — вендоренная v0.7.0 (commit `620d2225`), лицензия MIT,
+  происхождение и SHA-256 архива: `third_party/llama.cpp/VENDORING.md`.
+- `models/Qwen_Qwen3-1.7B-Q4_K_M.gguf.part` — полная копия весов (1 282 439 584 байт)
+  только на этой машине; можно переименовать в `.gguf` или пушить как есть.
+- `Qwen_Implement.md` — исходное задание; в Git не добавлен.
 
-## Результаты проверок (2026-10-24, предыдущая сессия; исторические, в текущей не перезапускались)
-- `.\gradlew.bat :app:assembleDebug` — успех, 46.7 с.
-  APK: `app/build/outputs/apk/debug/app-debug.apk` (11.18 МБ).
-- `.\gradlew.bat :app:testDebugUnitTest` — успех, 12.5 с, 1 тест, 0 failures/errors.
-- `.\gradlew.bat :app:lintDebug` — успех, 20.7 с, 15 warnings / 0 errors.
-- `git ls-files --others --exclude-standard` — 48 файлов, запрещённых путей не найдено.
+## Проверенные команды
+```powershell
+.\gradlew.bat :app:assembleDebug
+.\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat :app:lintDebug
+```
+Перед использованием убедиться, что модуль `:app` и задачи существуют. Git-коммитов нет;
+`.gitignore` дополнен `/models/` и `*.gguf.part`.
 
-## Риски
-- Шаблонный `com.example` и lint-замечания не исправлялись.
-- Запуск приложения, instrumented-тесты и release/R8 не проверялись.
-- Поведение `external_directory: ask` в этой сессии не проверено.
-- `.opencode/package.json` и lock-файл не версионируются из-за вложенного ignore — решить отдельно, если нужно.
+## Хрупкие места
+- `llama_tokenize` этой ревизии сигнализирует нехватку буфера отрицательным числом;
+  размерный проход с `nullptr, 0` всегда возвращает отрицательное значение — это норма,
+  а не ошибка. Не «исправлять» обратно.
+- `llama_model_params` не имеет `use_mmap`: используется `load_mode`.
+- Kotlin-логи в release-сборке отсутствуют по правилам R8; для диагностики — debug.
+- PowerShell 5.1: `Set-Content -Encoding UTF8` добавляет BOM и ломает TOML/JSON —
+  писать через `[IO.File]::WriteAllText(..., UTF8Encoding($false))`.
+- `adb exec-out screencap -p > file` в PowerShell 5.1 портит PNG; использовать
+  `adb shell screencap -p /sdcard/s.png` + `adb pull`.
 
-## Не делать
-Не выполнять `git add`, `git commit`, `git push` без отдельного подтверждения. Не устанавливать APK и не запускать приложение. Не менять код, зависимости, версии, Manifest и нативную конфигурацию.
+## Открытые задачи
+1. Прогнать на реальном телефоне по `docs/IMPLEMENTATION_REPORT.md` §9 и заполнить таблицу
+   §5 фактическими данными; APK на телефон не ставить без разрешения.
+2. Согласовать исправление дефектов из §7 отчёта: автоскролл к новому ответу, потеря
+   частичного текста при убийстве процесса, недоступность импорта/удаления при готовой модели.
+3. Согласовать M3: запись аудио, whisper.cpp, транскрипция, правка текста перед отправкой.
+
+## Инструментация (debug)
+`LlmNative` пишет `model load took N ms`, `prompt ready`, `first token after N ms`, RSS в кБ,
+`generation finished: N tokens … (X tok/s)`; `ChatViewModel` — `first visible token after N ms`
+и `turn finished in N ms, chars=N, cancelled=…`. Тексты сообщений в логи не пишутся.
+
+## Что не делать без подтверждения
+`git add`, `git commit`, `git push`, установка APK, удаление модели или истории диалога,
+добавление разрешений в Manifest, новые зависимости, апгрейд Gradle/AGP/Kotlin/NDK/CMake.
