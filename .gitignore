@@ -16,6 +16,15 @@ local.properties
 # Local tooling
 .opencode/node_modules/
 
+# IDE metadata
+.idea/
+
+# Local test/diagnostic dumps (logcat, test-result)
+diagnostics/
+
+# Local CMake/whisper build module (build outputs)
+/whisper/
+
 # Signing secrets
 *.jks
 *.keystore

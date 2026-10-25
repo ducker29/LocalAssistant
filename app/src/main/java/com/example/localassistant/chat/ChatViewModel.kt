@@ -63,6 +63,20 @@ class ChatViewModel(
         _state.update { it.copy(input = value) }
     }
 
+    /**
+     * Adds a recognised utterance to the draft without sending anything. Existing text is
+     * preserved; the new utterance starts on its own line.
+     */
+    fun appendDraft(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        _state.update { current ->
+            val existing = current.input.trimEnd()
+            val merged = if (existing.isEmpty()) clean else existing + "\n" + clean
+            current.copy(input = merged)
+        }
+    }
+
     fun clearError() {
         _state.update { it.copy(error = null) }
     }

@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "LocalAssistant"
 include(":app")
+include(":whisper")

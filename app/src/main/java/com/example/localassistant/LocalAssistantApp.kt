@@ -1,7 +1,11 @@
 package com.example.localassistant
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.content.Context
+import com.example.localassistant.asr.WhisperEngine
+import com.example.localassistant.asr.WhisperModelStore
+import com.example.localassistant.asr.WhisperRepository
 import com.example.localassistant.chat.ConversationStore
 import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
@@ -9,22 +13,39 @@ import com.example.localassistant.model.ModelRepository
 import com.example.localassistant.model.ModelStore
 
 /**
- * Single process-wide holder for the inference engine. Keeping it here prevents duplicate
- * model loads when the activity is recreated.
+ * Single process-wide holder for the inference engines. Keeping them here prevents duplicate
+ * model loads when the activity is recreated and lets the app react to memory pressure.
  */
 class AppContainer(context: Context) {
     val engine: LlmEngine = LlamaEngine()
     val conversationStore = ConversationStore(context.filesDir)
     val modelStore = ModelStore(context.filesDir)
     val modelRepository = ModelRepository(modelStore, engine, context.contentResolver)
+
+    val whisperEngine = WhisperEngine()
+    val whisperStore = WhisperModelStore(context.filesDir)
+    val whisperRepository = WhisperRepository(
+        store = whisperStore,
+        engine = whisperEngine,
+        contentResolver = context.contentResolver,
+    )
 }
 
-class LocalAssistantApp : Application() {
+class LocalAssistantApp : Application(), ComponentCallbacks2 {
     lateinit var container: AppContainer
         private set
 
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            // The recogniser is only needed while the user is speaking; drop it first when
+            // the system asks for memory. It is reloaded lazily before the next recording.
+            container.whisperRepository.releaseEngine()
+        }
     }
 }

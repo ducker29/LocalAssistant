@@ -246,4 +246,47 @@ class ChatViewModelTest {
         assertTrue(vm.state.value.model is ModelStatus.Ready)
         assertNull(vm.state.value.error)
     }
+
+    @Test
+    fun `appendDraft adds a new line and keeps existing text`() {
+        val vm = viewModel()
+        vm.onInputChange("Мой черновик")
+
+        vm.appendDraft("  Добавленная фраза  ")
+
+        assertEquals("Мой черновик\nДобавленная фраза", vm.state.value.input)
+        assertTrue(vm.state.value.messages.isEmpty())
+    }
+
+    @Test
+    fun `appendDraft fills an empty draft`() {
+        val vm = viewModel()
+
+        vm.appendDraft("Первая фраза")
+
+        assertEquals("Первая фраза", vm.state.value.input)
+    }
+
+    @Test
+    fun `appendDraft ignores blank transcripts`() {
+        val vm = viewModel()
+        vm.onInputChange("Черновик")
+
+        vm.appendDraft("   \n ")
+
+        assertEquals("Черновик", vm.state.value.input)
+    }
+
+    @Test
+    fun `appendDraft never sends a message`() {
+        val engine = FakeEngine()
+        val vm = viewModel(engine)
+        vm.onInputChange("Черновик")
+
+        vm.appendDraft("Распознанная речь")
+
+        assertFalse(vm.state.value.isGenerating)
+        assertTrue(vm.state.value.messages.isEmpty())
+        assertTrue(engine.lastMessages.isEmpty())
+    }
 }

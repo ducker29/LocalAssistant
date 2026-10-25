@@ -10,6 +10,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.localassistant.chat.ChatScreen
 import com.example.localassistant.chat.ChatViewModel
 import com.example.localassistant.ui.theme.LocalAssistantTheme
+import com.example.localassistant.voice.VoiceViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -25,9 +26,16 @@ class MainActivity : ComponentActivity() {
                         conversationStore = container.conversationStore,
                     )
                 )
+                val voiceViewModel: VoiceViewModel = viewModel(
+                    factory = VoiceViewModel.Factory(
+                        repository = container.whisperRepository,
+                    )
+                )
                 val state by chatViewModel.state.collectAsStateWithLifecycle()
+                val voiceState by voiceViewModel.state.collectAsStateWithLifecycle()
                 ChatScreen(
                     state = state,
+                    voice = voiceState,
                     onInputChange = chatViewModel::onInputChange,
                     onSend = chatViewModel::send,
                     onStop = chatViewModel::stopGeneration,
@@ -38,6 +46,21 @@ class MainActivity : ComponentActivity() {
                     onDeleteModel = chatViewModel::deleteModel,
                     onRetryModelLoad = chatViewModel::retryModelLoad,
                     onDismissError = chatViewModel::clearError,
+                    onAppendDraft = chatViewModel::appendDraft,
+                    onVoiceStart = voiceViewModel::startRecording,
+                    onVoiceStop = voiceViewModel::stopRecording,
+                    onVoiceStopAndHold = voiceViewModel::stopAndHold,
+                    onVoiceCancel = voiceViewModel::cancelRecording,
+                    onVoiceTranscribeDraft = voiceViewModel::transcribeDraft,
+                    onVoiceDiscardDraft = voiceViewModel::discardDraft,
+                    onVoiceCancelTranscription = voiceViewModel::cancelTranscription,
+                    onVoiceTranscriptConsumed = voiceViewModel::consumeTranscript,
+                    onVoiceErrorShown = voiceViewModel::clearError,
+                    onWhisperDownload = voiceViewModel::downloadModel,
+                    onWhisperCancelDownload = voiceViewModel::cancelDownload,
+                    onWhisperImport = voiceViewModel::importModel,
+                    onWhisperDelete = voiceViewModel::deleteModel,
+                    onWhisperRetry = voiceViewModel::retryModelLoad,
                 )
             }
         }
