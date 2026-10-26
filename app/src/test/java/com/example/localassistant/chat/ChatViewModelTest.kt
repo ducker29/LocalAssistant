@@ -4,14 +4,16 @@ import android.net.Uri
 import com.example.localassistant.MainDispatcherRule
 import com.example.localassistant.llm.EngineState
 import com.example.localassistant.llm.GenerationParams
+import com.example.localassistant.llm.GenerationResult
+import com.example.localassistant.llm.GenerationTermination
 import com.example.localassistant.llm.LlmEngine
 import com.example.localassistant.llm.PromptMessage
 import com.example.localassistant.model.ModelStatus
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -25,28 +27,102 @@ class ChatViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
+    /**
+     * A generation handle the test drives explicitly. [complete]/[cancel] fire [onDone]
+     * (chunks emitted first), mirroring the real engine: [onDone] is invoked exactly once,
+     * off the caller's thread. The [job] returned by [handle] suspends until then.
+     */
+    private class FakeGeneration(
+        initialChunks: List<String>,
+        private val failure: Throwable?,
+        private val onChunk: (String) -> Unit,
+        private val onDone: (GenerationResult) -> Unit,
+    ) {
+        private val signal = CompletableDeferred<Unit>()
+        private val chunks = ArrayList<String>()
+        private var fired = false
+
+        init {
+            for (chunk in initialChunks) {
+                chunks.add(chunk)
+                onChunk(chunk)
+            }
+        }
+
+        fun emit(chunk: String) {
+            chunks.add(chunk)
+            onChunk(chunk)
+        }
+
+        fun cancel() {
+            fire(GenerationTermination.CANCELLED)
+        }
+
+        fun complete() {
+            val termination = if (failure != null) GenerationTermination.ERROR else GenerationTermination.EOG
+            fire(termination, errorMessage = failure?.message)
+        }
+
+        fun fireTermination(
+            termination: GenerationTermination,
+            text: String = chunks.joinToString(""),
+            errorMessage: String? = null,
+        ) {
+            fire(termination, text, errorMessage)
+        }
+
+        private fun fire(
+            termination: GenerationTermination,
+            text: String = chunks.joinToString(""),
+            errorMessage: String? = null,
+        ) {
+            if (fired) return
+            fired = true
+            signal.complete(Unit)
+            onDone(GenerationResult(text, termination, errorMessage))
+        }
+
+        /** A [Job] that suspends (join) until the generation fires. */
+        fun handle(): Job = signal
+    }
+
     private class FakeEngine : LlmEngine {
         override val state = MutableStateFlow<EngineState>(EngineState.Ready("fake", 2048))
         var chunks: List<String> = listOf("Ответ")
         var failure: Throwable? = null
-        var gate: CompletableDeferred<Unit>? = null
         var promptTokens = 32
         var lastMessages: List<PromptMessage> = emptyList()
+        var lastMaxTokens: Int? = null
+        var active: FakeGeneration? = null
 
         override suspend fun load(modelPath: String): Result<Unit> = Result.success(Unit)
 
         override suspend fun unload() = Unit
 
-        override fun generate(messages: List<PromptMessage>, params: GenerationParams): Flow<String> {
+        override fun generate(
+            messages: List<PromptMessage>,
+            params: GenerationParams,
+            onChunk: (String) -> Unit,
+            onDone: (GenerationResult) -> Unit,
+        ): Job {
             lastMessages = messages
-            return flow {
-                gate?.await()
-                chunks.forEach { emit(it) }
-                failure?.let { throw it }
-            }
+            lastMaxTokens = params.maxTokens
+            val generation = FakeGeneration(emptyList(), failure, onChunk, onDone)
+            active = generation
+            // Emit chunks up front (streaming), but DO NOT fire onDone yet — the test
+            // decides whether the generation completes (finish) or is cancelled (stopGeneration).
+            for (chunk in chunks) generation.emit(chunk)
+            return generation.handle()
         }
 
-        override fun cancelGeneration() = Unit
+        /** Fire [onDone] with EOG (or ERROR if [failure] is set). */
+        fun finish() {
+            active?.complete()
+        }
+
+        override fun cancelGeneration() {
+            active?.cancel()
+        }
 
         override suspend fun countPromptTokens(messages: List<PromptMessage>): Int = promptTokens
 
@@ -79,7 +155,7 @@ class ChatViewModelTest {
 
     private fun viewModel(
         engine: FakeEngine = FakeEngine(),
-        gateway: FakeGateway = FakeGateway(),
+        gateway: ModelGateway = FakeGateway(),
         persistence: MemoryPersistence = MemoryPersistence(),
     ) = ChatViewModel(engine, gateway, persistence)
 
@@ -90,6 +166,7 @@ class ChatViewModelTest {
 
         vm.onInputChange("Привет!")
         vm.send()
+        engine.finish()
 
         val messages = vm.state.value.messages
         assertEquals(2, messages.size)
@@ -135,7 +212,6 @@ class ChatViewModelTest {
     @Test
     fun `cancelled generation is marked as interrupted and keeps partial text`() {
         val engine = FakeEngine().apply {
-            gate = CompletableDeferred()
             chunks = listOf("Начало ответа")
         }
         val vm = viewModel(engine)
@@ -145,7 +221,7 @@ class ChatViewModelTest {
         assertTrue(vm.state.value.isGenerating)
 
         vm.stopGeneration()
-        engine.gate?.complete(Unit)
+        engine.active?.complete() // native loop notices the cancel flag and returns
 
         val assistant = vm.state.value.messages.last()
         assertEquals(MessageStatus.INTERRUPTED, assistant.status)
@@ -156,7 +232,6 @@ class ChatViewModelTest {
     @Test
     fun `stop before the first token is interrupted rather than failed`() {
         val engine = FakeEngine().apply {
-            gate = CompletableDeferred()
             chunks = emptyList()
         }
         val vm = viewModel(engine)
@@ -164,7 +239,7 @@ class ChatViewModelTest {
         vm.onInputChange("Длинный рассказ")
         vm.send()
         vm.stopGeneration()
-        engine.gate?.complete(Unit)
+        engine.active?.complete()
 
         assertEquals(MessageStatus.INTERRUPTED, vm.state.value.messages.last().status)
         assertNull(vm.state.value.error)
@@ -179,6 +254,7 @@ class ChatViewModelTest {
 
         vm.onInputChange("Привет")
         vm.send()
+        engine.finish() // fires onDone with ERROR (failure is set)
 
         val assistant = vm.state.value.messages.last()
         assertEquals(MessageStatus.FAILED, assistant.status)
@@ -192,6 +268,7 @@ class ChatViewModelTest {
 
         vm.onInputChange("Привет")
         vm.send()
+        engine.finish() // EOG with empty text -> FAILED
 
         assertEquals(MessageStatus.FAILED, vm.state.value.messages.last().status)
     }
@@ -212,7 +289,6 @@ class ChatViewModelTest {
     @Test
     fun `interrupted assistant turns are not sent back to the model`() {
         val engine = FakeEngine().apply {
-            gate = CompletableDeferred()
             chunks = listOf("обрывок")
         }
         val vm = viewModel(engine)
@@ -220,13 +296,13 @@ class ChatViewModelTest {
         vm.onInputChange("Первый вопрос")
         vm.send()
         vm.stopGeneration()
-        engine.gate?.complete(Unit)
+        engine.active?.complete()
         assertEquals(MessageStatus.INTERRUPTED, vm.state.value.messages.last().status)
 
-        engine.gate = null
         engine.chunks = listOf("Второй ответ")
         vm.onInputChange("Второй вопрос")
         vm.send()
+        engine.finish()
 
         assertEquals("system", engine.lastMessages.first().role)
         assertTrue(engine.lastMessages.none { it.role == "assistant" && it.content == "обрывок" })
@@ -234,11 +310,12 @@ class ChatViewModelTest {
 
     @Test
     fun `new chat clears messages but keeps the model`() {
+        val engine = FakeEngine()
         val persistence = MemoryPersistence()
-        val vm = viewModel(persistence = persistence)
+        val vm = ChatViewModel(engine, FakeGateway(), persistence)
         vm.onInputChange("Привет")
         vm.send()
-
+        engine.finish()
         vm.newChat()
 
         assertTrue(vm.state.value.messages.isEmpty())
@@ -289,4 +366,100 @@ class ChatViewModelTest {
         assertTrue(vm.state.value.messages.isEmpty())
         assertTrue(engine.lastMessages.isEmpty())
     }
+
+    // --- Phase 2: adaptive budget + termination mapping -------------------------
+
+    @Test
+    fun `adaptive budget respects cap and floor`() {
+        // available = 2048-32-8 = 2008 >= cap 1024 -> cap wins
+        assertEquals(1024, ChatViewModel.computeMaxTokens(2048, 32))
+        // available = 2048-1024-8 = 1016 < cap 1024 -> available wins
+        assertEquals(1016, ChatViewModel.computeMaxTokens(2048, 1024))
+        // 2048 - 1900 - 8 = 140
+        assertEquals(140, ChatViewModel.computeMaxTokens(2048, 1900))
+        // clamped to the minimum output floor
+        assertEquals(8, ChatViewModel.computeMaxTokens(2048, 2040))
+        // custom cap
+        assertEquals(500, ChatViewModel.computeMaxTokens(2048, 10, cap = 500))
+    }
+
+    @Test
+    fun `max tokens requested is the adaptive budget`() {
+        val engine = FakeEngine() // promptTokens = 32 -> min(1024, 2048-32-8=2008) = 1024
+        val vm = viewModel(engine)
+
+        vm.onInputChange("Привет")
+        vm.send()
+        engine.finish()
+
+        assertEquals(1024, engine.lastMaxTokens)
+    }
+
+    // A fake that reports BUDGET termination (output budget exhausted mid-answer) so the
+    // ViewModel maps it to TRUNCATED, never COMPLETE.
+    private class BudgetFakeEngine : LlmEngine {
+        override val state = MutableStateFlow<EngineState>(EngineState.Ready("fake", 2048))
+        var termination: GenerationTermination = GenerationTermination.BUDGET
+        var errorMessage: String? = null
+        var promptTokens = 32
+
+        override suspend fun load(modelPath: String): Result<Unit> = Result.success(Unit)
+        override suspend fun unload() = Unit
+
+        override fun generate(
+            messages: List<PromptMessage>,
+            params: GenerationParams,
+            onChunk: (String) -> Unit,
+            onDone: (GenerationResult) -> Unit,
+        ): Job {
+            val gen = FakeGeneration(emptyList(), null, onChunk, onDone)
+            gen.emit("Частичный ответ")
+            gen.fireTermination(termination, "Частичный ответ", errorMessage)
+            return gen.handle()
+        }
+
+        override fun cancelGeneration() = Unit
+        override suspend fun countPromptTokens(messages: List<PromptMessage>): Int = promptTokens
+        override suspend fun close() = Unit
+    }
+
+    @Test
+    fun `budget exhaustion is marked truncated not complete`() {
+        val engine = BudgetFakeEngine() // termination = BUDGET by default
+        val vm = ChatViewModel(engine, FakeGateway(), MemoryPersistence())
+
+        vm.onInputChange("Расскажи длинно")
+        vm.send()
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.TRUNCATED, assistant.status)
+        assertEquals("Частичный ответ", assistant.text)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `termination mapping table`() {
+        // Mirror of the ViewModel's status derivation, kept in sync on purpose.
+        val cases = mapOf(
+            GenerationTermination.EOG to MessageStatus.COMPLETE,
+            GenerationTermination.BUDGET to MessageStatus.TRUNCATED,
+            GenerationTermination.CONTEXT to MessageStatus.TRUNCATED,
+        )
+        for ((termination, expected) in cases) {
+            assertEquals(expected, deriveStatusFor(termination, "непусто"))
+        }
+        assertEquals(MessageStatus.INTERRUPTED, deriveStatusFor(GenerationTermination.CANCELLED, "обрывок"))
+        assertEquals(MessageStatus.FAILED, deriveStatusFor(GenerationTermination.ERROR, "x"))
+        assertEquals(MessageStatus.FAILED, deriveStatusFor(GenerationTermination.EOG, ""))
+    }
+
+    private fun deriveStatusFor(termination: GenerationTermination, text: String): MessageStatus =
+        when {
+            termination == GenerationTermination.CANCELLED -> MessageStatus.INTERRUPTED
+            termination == GenerationTermination.BUDGET ||
+                termination == GenerationTermination.CONTEXT ->
+                if (text.isBlank()) MessageStatus.FAILED else MessageStatus.TRUNCATED
+            termination == GenerationTermination.ERROR -> MessageStatus.FAILED
+            else -> if (text.isBlank()) MessageStatus.FAILED else MessageStatus.COMPLETE
+        }
 }

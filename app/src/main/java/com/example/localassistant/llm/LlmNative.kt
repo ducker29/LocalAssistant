@@ -51,8 +51,15 @@ internal object LlmNative {
     ): String
 
     /**
-     * Streams the answer through [callback]. Returns an error message or null.
-     * Cancellation is cooperative: [cancelFlag] is polled between tokens.
+     * Streams the answer through [callback]. Cancellation is cooperative: [cancelFlag] is
+     * polled between tokens.
+     *
+     * Returns a termination code, never null:
+     *  - `"EOG"`             – the model produced an end-of-generation token;
+     *  - `"BUDGET"`          – the output token budget was exhausted before EOG;
+     *  - `"CANCELLED"`       – [cancelFlag] was set;
+     *  - `"CONTEXTEXHAUSTED|<msg>"` – the prompt alone leaves no room;
+     *  - `"ERROR|<message>"` – an error occurred during generation.
      */
     external fun nativeGenerate(
         handle: Long,

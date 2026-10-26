@@ -473,7 +473,13 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
         budget = h->n_ctx - static_cast<int32_t>(tokens.size()) - 4;
     }
     if (budget < 8) {
-        return std_to_jstring(env, "История не помещается в контекст модели");
+        LOGI("context budget exhausted before generation: prompt=%zu tokens, n_ctx=%d",
+             tokens.size(), h->n_ctx);
+        return std_to_jstring(env, "CONTEXTEXHAUSTED|История не помещается в контекст модели");
+    }
+    if (budget < max_tokens) {
+        LOGI("output budget clamped: requested=%d, clamped=%d (prompt=%zu tokens, n_ctx=%d)",
+             max_tokens, budget, tokens.size(), h->n_ctx);
     }
 
     llama_memory_clear(llama_get_memory(h->ctx), true);
@@ -508,12 +514,39 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
     std::string result_error;
     int32_t produced = 0;
     bool first_token_logged = false;
+    bool terminated_by_eog = false;
+    bool terminated_by_cancel = false;
     char piece[256];
+
+    auto emit_piece = [&](const char * data, int32_t len) {
+        if (len <= 0) {
+            return;
+        }
+        std::string text = stream.feed(data, static_cast<size_t>(len));
+        if (text.empty()) {
+            return;
+        }
+        if (!first_token_logged) {
+            first_token_logged = true;
+            LOGI("first token after %lld ms from request, RSS: %ld kB",
+                 elapsed_ms(t_request), process_rss_kb());
+        }
+        jstring jtext = env->NewStringUTF(text.c_str());
+        if (jtext != nullptr) {
+            env->CallVoidMethod(callback, on_token, jtext);
+            env->DeleteLocalRef(jtext);
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            result_error = "Ошибка при передаче токена в Kotlin";
+        }
+    };
 
     for (int32_t i = 0; i < budget; ++i) {
         if (is_cancelled(env, cancel_flag, get_id)) {
             LOGI("generation cancelled after %d tokens in %lld ms",
                  produced, elapsed_ms(t_request));
+            terminated_by_cancel = true;
             break;
         }
         if (env->ExceptionCheck()) {
@@ -524,29 +557,22 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
 
         const llama_token id = llama_sampler_sample(smpl, h->ctx, -1);
         if (llama_vocab_is_eog(h->vocab, id)) {
+            // Emit the EOG piece (typically the newline that ends the turn) so the model's
+            // output is not silently truncated before its final line break.
+            const int32_t eog_len = llama_token_to_piece(
+                    h->vocab, id, piece, sizeof(piece), 0, /*special=*/true);
+            emit_piece(piece, eog_len);
+            if (!result_error.empty()) {
+                break;
+            }
+            terminated_by_eog = true;
             break;
         }
 
         const int32_t n = llama_token_to_piece(h->vocab, id, piece, sizeof(piece), 0, /*special=*/true);
-        if (n > 0) {
-            std::string text = stream.feed(piece, static_cast<size_t>(n));
-            if (!text.empty()) {
-                if (!first_token_logged) {
-                    first_token_logged = true;
-                    LOGI("first token after %lld ms from request, RSS: %ld kB",
-                         elapsed_ms(t_request), process_rss_kb());
-                }
-                jstring jtext = env->NewStringUTF(text.c_str());
-                if (jtext != nullptr) {
-                    env->CallVoidMethod(callback, on_token, jtext);
-                    env->DeleteLocalRef(jtext);
-                }
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                    result_error = "Ошибка при передаче токена в Kotlin";
-                    break;
-                }
-            }
+        emit_piece(piece, n);
+        if (!result_error.empty()) {
+            break;
         }
 
         llama_sampler_accept(smpl, id);
@@ -583,10 +609,25 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
         LOGI("generation finished: no tokens after %lld ms", total_ms);
     }
 
+    std::string reason;
     if (!result_error.empty()) {
-        return std_to_jstring(env, result_error);
+        reason = "ERROR";
+    } else if (terminated_by_cancel) {
+        reason = "CANCELLED";
+    } else if (terminated_by_eog) {
+        reason = "EOG";
+    } else {
+        reason = "BUDGET";
     }
-    return nullptr;
+
+    if (produced > 0) {
+        LOGI("generation terminated: reason=%s, tokens=%d", reason.c_str(), produced);
+    }
+
+    if (reason == "ERROR") {
+        return std_to_jstring(env, reason + "|" + result_error);
+    }
+    return std_to_jstring(env, reason);
 }
 
 } // extern "C"

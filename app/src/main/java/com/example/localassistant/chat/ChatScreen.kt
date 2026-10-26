@@ -471,6 +471,7 @@ private fun MessageBubble(message: ChatMessage, onCopy: (String) -> Unit) {
                 }
                 when (message.status) {
                     MessageStatus.INTERRUPTED -> StatusLine("Остановлено")
+                    MessageStatus.TRUNCATED -> StatusLine("Ответ остановлен по ограничению длины")
                     MessageStatus.FAILED -> StatusLine("Ошибка", error = true)
                     else -> Unit
                 }

@@ -1,6 +1,6 @@
 package com.example.localassistant.llm
 
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 
 /** One message exactly as it will be rendered into the model prompt. */
@@ -23,6 +23,30 @@ sealed interface EngineState {
 
 class LlmException(message: String) : Exception(message)
 
+/** Why a generation stopped. Lets the UI distinguish a natural end from a truncation. */
+enum class GenerationTermination {
+    /** The model emitted its end-of-generation token. */
+    EOG,
+
+    /** The output token budget was exhausted before the model finished. */
+    BUDGET,
+
+    /** The context window could not hold the prompt plus at least a minimal answer. */
+    CONTEXT,
+
+    /** The user (or a host policy) requested cancellation. */
+    CANCELLED,
+
+    /** A native or transport error interrupted generation. [message] holds details. */
+    ERROR,
+}
+
+data class GenerationResult(
+    val text: String,
+    val termination: GenerationTermination,
+    val errorMessage: String? = null,
+)
+
 /**
  * Local inference engine abstraction. One instance owns at most one loaded model and
  * at most one active generation.
@@ -34,8 +58,17 @@ interface LlmEngine {
 
     suspend fun unload()
 
-    /** Streams decoded UTF-8 text chunks. Cancelling the collector stops native work. */
-    fun generate(messages: List<PromptMessage>, params: GenerationParams): Flow<String>
+    /**
+     * Streams decoded UTF-8 text chunks through [onChunk]; on completion or failure invokes
+     * [onDone] exactly once with the full text and the reason generation stopped. Cancelling
+     * the returned [Job] stops the native work and reports a [GenerationTermination.CANCELLED].
+     */
+    fun generate(
+        messages: List<PromptMessage>,
+        params: GenerationParams,
+        onChunk: (String) -> Unit,
+        onDone: (GenerationResult) -> Unit,
+    ): Job
 
     fun cancelGeneration()
 

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.localassistant.llm.GenerationParams
+import com.example.localassistant.llm.GenerationTermination
 import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
 import com.example.localassistant.llm.PromptMessage
@@ -114,9 +115,15 @@ class ChatViewModel(
         generationJob = viewModelScope.launch {
             val startedAt = System.nanoTime()
             fun elapsedMs() = (System.nanoTime() - startedAt) / 1_000_000
+            val nativeContext = (snapshot.model as ModelStatus.Ready).contextTokens
+
+            // Fit history into the window, reserving room for at least a minimal answer.
+            // The output is capped at CAP_TOKENS, so reserving that here guarantees the
+            // planned prompt leaves room for the full budget (the planner's 8-token margin
+            // keeps the safety margin intact).
             val planner = ContextPlanner(
-                maxContextTokens = (snapshot.model as ModelStatus.Ready).contextTokens,
-                reservedOutputTokens = LlamaEngine.DEFAULT_MAX_RESPONSE_TOKENS,
+                maxContextTokens = nativeContext,
+                reservedOutputTokens = CAP_TOKENS,
             )
             val history = _state.value.messages.dropLast(1)
             val turns = buildTurns(history)
@@ -139,9 +146,19 @@ class ChatViewModel(
             }
             _state.update { it.copy(droppedTurns = planned.droppedTurns) }
 
+            // Adaptive output budget: never ask for more than the window can actually return.
+            val promptTokens = engine.countPromptTokens(planned.messages)
+            val maxTokens = computeMaxTokens(nativeContext, promptTokens, CAP_TOKENS, SAFETY_MARGIN)
+            Log.i(
+                TAG,
+                "adaptive budget: n_ctx=$nativeContext, prompt=${promptTokens} " +
+                    "tokens, max_tokens=$maxTokens (cap=$CAP_TOKENS, margin=$SAFETY_MARGIN)",
+            )
+
             val filter = ReasoningFilter()
             val answer = StringBuilder()
-            var failure: String? = null
+            var termination: GenerationTermination = GenerationTermination.CANCELLED
+            var errorMessage: String? = null
             var firstVisibleLogged = false
             fun noteVisible(text: String) {
                 if (text.isEmpty()) return
@@ -152,42 +169,63 @@ class ChatViewModel(
                 }
                 updateMessageText(assistantId, answer.toString())
             }
+
+            val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val genJob = engine.generate(
+                planned.messages,
+                GenerationParams(maxTokens = maxTokens),
+                onChunk = { chunk -> noteVisible(filter.append(chunk)) },
+                onDone = { result ->
+                    noteVisible(filter.finish())
+                    termination = result.termination
+                    errorMessage = result.errorMessage
+                    done.complete(Unit)
+                },
+            )
+            generationJob = genJob
+
             try {
-                engine.generate(
-                    planned.messages,
-                    GenerationParams(maxTokens = LlamaEngine.DEFAULT_MAX_RESPONSE_TOKENS),
-                ).collect { chunk ->
-                    noteVisible(filter.append(chunk))
-                }
-                noteVisible(filter.finish())
+                done.join()
             } catch (t: Throwable) {
-                failure = t.message ?: "Ошибка генерации"
+                termination = GenerationTermination.ERROR
+                errorMessage = t.message ?: "Ошибка генерации"
             }
 
             val textOut = answer.toString()
-            when {
-                cancelRequested -> finishMessage(assistantId, MessageStatus.INTERRUPTED, textOut)
+            val finalStatus = when {
+                termination == GenerationTermination.CANCELLED -> MessageStatus.INTERRUPTED
 
-                failure != null -> {
-                    finishMessage(assistantId, MessageStatus.FAILED, textOut)
-                    _state.update { it.copy(error = failure) }
+                termination == GenerationTermination.BUDGET ||
+                    termination == GenerationTermination.CONTEXT ->
+                    if (textOut.isBlank()) {
+                        _state.update {
+                            it.copy(error = errorMessage ?: "Недостаточно контекста для ответа")
+                        }
+                        MessageStatus.FAILED
+                    } else {
+                        MessageStatus.TRUNCATED
+                    }
+
+                termination == GenerationTermination.ERROR -> {
+                    _state.update { it.copy(error = errorMessage ?: "Ошибка генерации") }
+                    MessageStatus.FAILED
                 }
 
-                textOut.isBlank() -> {
-                    finishMessage(
-                        assistantId,
-                        MessageStatus.FAILED,
-                        "Модель вернула пустой ответ",
-                    )
+                else -> { // EOG
+                    if (textOut.isBlank()) {
+                        _state.update { it.copy(error = "Модель вернула пустой ответ") }
+                        MessageStatus.FAILED
+                    } else {
+                        MessageStatus.COMPLETE
+                    }
                 }
-
-                else -> finishMessage(assistantId, MessageStatus.COMPLETE, textOut)
             }
+            finishMessage(assistantId, finalStatus, textOut)
             _state.update { it.copy(isGenerating = false) }
             Log.i(
                 TAG,
-                "turn finished in ${elapsedMs()} ms, " +
-                    "chars=${textOut.length}, cancelled=$cancelRequested",
+                "turn finished in ${elapsedMs()} ms, chars=${textOut.length}, " +
+                    "termination=${termination.name}, status=$finalStatus",
             )
             persist()
         }
@@ -287,5 +325,26 @@ class ChatViewModel(
         private const val SYSTEM_PROMPT =
             "Ты — локальный ассистент на смартфоне. Отвечай ясно, по существу и на языке " +
                 "пользователя. Если не знаешь ответа — скажи об этом прямо."
+
+        /** Hard cap on the output budget in tokens (spec: min(1024, available)). */
+        const val CAP_TOKENS = 1024
+        /** Tokens reserved inside the window for the safety margin. */
+        const val SAFETY_MARGIN = 8
+
+        /**
+         * Adaptive output budget: [effectiveMaxTokens] = min(cap, nativeContext - promptTokens - margin),
+         * clamped to [MIN_OUTPUT_TOKENS]..[cap].
+         */
+        fun computeMaxTokens(
+            nativeContext: Int,
+            promptTokens: Int,
+            cap: Int = CAP_TOKENS,
+            margin: Int = SAFETY_MARGIN,
+        ): Int {
+            val available = nativeContext - promptTokens - margin
+            return minOf(cap, available).coerceIn(MIN_OUTPUT_TOKENS, cap)
+        }
+
+        private const val MIN_OUTPUT_TOKENS = 8
     }
 }

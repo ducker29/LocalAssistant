@@ -6,11 +6,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -86,7 +85,12 @@ class LlamaEngine(
         }
     }
 
-    override fun generate(messages: List<PromptMessage>, params: GenerationParams): Flow<String> {
+    override fun generate(
+        messages: List<PromptMessage>,
+        params: GenerationParams,
+        onChunk: (String) -> Unit,
+        onDone: (GenerationResult) -> Unit,
+    ): Job {
         if (messages.isEmpty()) {
             throw LlmException("Пустой запрос к модели")
         }
@@ -94,54 +98,74 @@ class LlamaEngine(
             throw LlmException("Модель уже генерирует ответ")
         }
 
-        return kotlinx.coroutines.flow.flow {
-            val cancelFlag = AtomicBoolean(false)
-            activeCancel.set(cancelFlag)
-            val channel = Channel<String>(Channel.UNLIMITED)
-            val failure = AtomicReference<Throwable?>(null)
-            val roles = messages.map { it.role }.toTypedArray()
-            val contents = messages.map { it.content }.toTypedArray()
+        val cancelFlag = AtomicBoolean(false)
+        activeCancel.set(cancelFlag)
+        val text = StringBuilder()
+        var reported = AtomicBoolean(false)
+        var job: Job? = null
 
-            val producer = scope.launch {
-                try {
-                    val nativeHandle = ensureHandle()
-                    val error = LlmNative.nativeGenerate(
-                        nativeHandle,
-                        roles,
-                        contents,
-                        params.maxTokens,
-                        params.temperature,
-                        params.topP,
-                        params.topK,
-                        params.seed,
-                        cancelFlag,
-                        LlmNative.TokenCallback { text -> channel.trySend(text) },
-                    )
-                    if (error != null) {
-                        Log.e(TAG, "generation failed: $error")
-                        failure.set(LlmException(error))
-                    }
-                } catch (t: Throwable) {
-                    Log.e(TAG, "generation crashed", t)
-                    failure.set(t)
-                } finally {
-                    channel.close()
-                }
-            }
-
-            try {
-                for (chunk in channel) {
-                    emit(chunk)
-                }
-                failure.get()?.let { throw it }
-            } finally {
-                cancelFlag.set(true)
-                withContext(NonCancellable) {
-                    producer.join()
-                }
-                activeCancel.compareAndSet(cancelFlag, null)
+        fun finishIfPending(termination: GenerationTermination, message: String? = null) {
+            if (reported.compareAndSet(false, true)) {
                 busy.set(false)
+                activeCancel.set(null)
+                onDone(GenerationResult(text.toString(), termination, message))
             }
+        }
+
+        job = scope.launch {
+            try {
+                val nativeHandle = ensureHandle()
+                val raw = LlmNative.nativeGenerate(
+                    nativeHandle,
+                    messages.map { it.role }.toTypedArray(),
+                    messages.map { it.content }.toTypedArray(),
+                    params.maxTokens,
+                    params.temperature,
+                    params.topP,
+                    params.topK,
+                    params.seed,
+                    cancelFlag,
+                    LlmNative.TokenCallback { chunk ->
+                        text.append(chunk)
+                        onChunk(chunk)
+                    },
+                )
+                val parsed = parseTermination(raw)
+                if (parsed.termination == GenerationTermination.ERROR) {
+                    Log.e(TAG, "generation failed: ${parsed.errorMessage}")
+                }
+                finishIfPending(parsed.termination, parsed.errorMessage)
+            } catch (t: Throwable) {
+                Log.e(TAG, "generation crashed", t)
+                finishIfPending(GenerationTermination.ERROR, t.message ?: "Ошибка генерации")
+            }
+        }
+        // The producer may already have completed synchronously; only cancel if we are still
+        // alive. On cancellation the native loop observes the flag and finishes on its own,
+        // then finishIfPending reports CANCELLED (or BUDGET/EOG if it already ended).
+        job.invokeOnCompletion {
+            if (cancelFlag.compareAndSet(false, true)) {
+                finishIfPending(GenerationTermination.CANCELLED)
+            }
+        }
+        return job
+    }
+
+    /**
+     * Maps the native termination string to a [GenerationTermination]. The native side always
+     * returns a non-null code; a null/blank value is treated defensively as EOG.
+     */
+    private fun parseTermination(raw: String?): GenerationResult {
+        val code = raw?.substringBefore('|', "")?.trim()?.ifBlank { "EOG" } ?: "EOG"
+        val message = raw?.substringAfter('|', "")?.takeIf { it.isNotBlank() }
+        return when (code) {
+            "EOG" -> GenerationResult("", GenerationTermination.EOG)
+            "BUDGET" -> GenerationResult("", GenerationTermination.BUDGET)
+            "CANCELLED" -> GenerationResult("", GenerationTermination.CANCELLED)
+            "CONTEXTEXHAUSTED" ->
+                GenerationResult("", GenerationTermination.CONTEXT, message)
+            "ERROR" -> GenerationResult("", GenerationTermination.ERROR, message)
+            else -> GenerationResult("", GenerationTermination.ERROR, "Неизвестный код завершения: $code")
         }
     }
 

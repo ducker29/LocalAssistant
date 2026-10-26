@@ -15,6 +15,7 @@ enum class MessageStatus {
     COMPLETE,
     STREAMING,
     INTERRUPTED,
+    TRUNCATED,
     FAILED,
     ;
 
