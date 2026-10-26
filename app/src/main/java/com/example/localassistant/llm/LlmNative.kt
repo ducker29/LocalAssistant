@@ -42,6 +42,7 @@ internal object LlmNative {
         handle: Long,
         roles: Array<String>,
         contents: Array<String>,
+        assistantPrefix: String,
     ): Int
 
     external fun nativeFormatPrompt(
@@ -52,7 +53,8 @@ internal object LlmNative {
 
     /**
      * Streams the answer through [callback]. Cancellation is cooperative: [cancelFlag] is
-     * polled between tokens.
+     * polled between tokens. [assistantPrefix] is appended to the rendered template (which
+     * already ends with the assistant generation prompt) so generation continues that turn.
      *
      * Returns a termination code, never null:
      *  - `"EOG"`             – the model produced an end-of-generation token;
@@ -65,6 +67,7 @@ internal object LlmNative {
         handle: Long,
         roles: Array<String>,
         contents: Array<String>,
+        assistantPrefix: String,
         maxTokens: Int,
         temperature: Float,
         topP: Float,

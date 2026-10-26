@@ -90,6 +90,7 @@ class LlamaEngine(
         params: GenerationParams,
         onChunk: (String) -> Unit,
         onDone: (GenerationResult) -> Unit,
+        assistantPrefix: String,
     ): Job {
         if (messages.isEmpty()) {
             throw LlmException("Пустой запрос к модели")
@@ -120,6 +121,7 @@ class LlamaEngine(
                     nativeHandle,
                     messages.map { it.role }.toTypedArray(),
                     messages.map { it.content }.toTypedArray(),
+                    assistantPrefix,
                     params.maxTokens,
                     params.temperature,
                     params.topP,
@@ -164,7 +166,10 @@ class LlamaEngine(
         activeCancel.get()?.set(true)
     }
 
-    override suspend fun countPromptTokens(messages: List<PromptMessage>): Int {
+    override suspend fun countPromptTokens(
+        messages: List<PromptMessage>,
+        assistantPrefix: String,
+    ): Int {
         val nativeHandle = handle.get()
         if (nativeHandle == 0L || _state.value !is EngineState.Ready) {
             return -1
@@ -174,6 +179,7 @@ class LlamaEngine(
                 nativeHandle,
                 messages.map { it.role }.toTypedArray(),
                 messages.map { it.content }.toTypedArray(),
+                assistantPrefix,
             )
         }
     }

@@ -62,18 +62,23 @@ interface LlmEngine {
      * Streams decoded UTF-8 text chunks through [onChunk]; on completion or failure invokes
      * [onDone] exactly once with the full text and the reason generation stopped. Cancelling
      * the returned [Job] stops the native work and reports a [GenerationTermination.CANCELLED].
+     *
+     * [assistantPrefix] carries the already generated part of the assistant turn. When it is
+     * not blank the model continues that turn instead of starting a new one; the prefix is
+     * not reported through [onChunk] and is not part of the returned text.
      */
     fun generate(
         messages: List<PromptMessage>,
         params: GenerationParams,
         onChunk: (String) -> Unit,
         onDone: (GenerationResult) -> Unit,
+        assistantPrefix: String = "",
     ): Job
 
     fun cancelGeneration()
 
-    /** Tokens of the fully formatted prompt, or -1 when the model is not loaded. */
-    suspend fun countPromptTokens(messages: List<PromptMessage>): Int
+    /** Tokens of the fully formatted prompt plus [assistantPrefix], or -1 when not loaded. */
+    suspend fun countPromptTokens(messages: List<PromptMessage>, assistantPrefix: String = ""): Int
 
     suspend fun close()
 }

@@ -1,5 +1,38 @@
 # Передача контекста проекта
 
+## Состояние на 2026-10-26 — продолжение ответа и стабильный автоскролл
+
+Реализовано продолжение `TRUNCATED`-ответа и переработан автоскролл. Изменения
+**не закоммичены** (по требованию пользователя), remote не настроен.
+
+- `llama_jni.cpp` / `LlmNative.kt`: `assistantPrefix` в `nativeGenerate` и
+  `nativeCountPromptTokens`; шаблон рендерится с `add_generation_prompt=true`, затем
+  префикс дописывается к промпту — модель продолжает тот же ход.
+- `LlmEngine.kt` / `LlamaEngine.kt`: параметр `assistantPrefix = ""`.
+- `ChatViewModel.kt`: `continueGeneration(messageId)`; новых сообщений/реплик нет,
+  в промпт идут только `COMPLETE`-ходы с `id < targetId`, старые отбрасываются.
+  Планировщик резервирует только `MIN_OUTPUT_TOKENS` (иначе длинный префикс
+  отклоняется), фактический бюджет — прежняя формула `min(1024, n_ctx − prompt − 8)`.
+  Статусы: `CANCELLED→INTERRUPTED`, `BUDGET→TRUNCATED`, `CONTEXT→TRUNCATED`+ошибка,
+  `ERROR→FAILED`+ошибка, `EOG→COMPLETE`. `ChatUiState.continuationMessageId`.
+- `ChatScreen.kt`: кнопка «Продолжить» / «Продолжаем…» (disabled) только у
+  `TRUNCATED`; `autoFollow` отключается на `DragInteraction.Start`, включается у низа
+  и не отключается ростом текста; ключи эффекта включают статус последнего сообщения,
+  чтобы плашка и кнопки не оставались за экраном.
+- `ChatMessage.kt`: `ChatMessage.isContinuable`.
+- `ChatViewModelTest.kt`: +8 тестов (префикс не дублируется, повторный `BUDGET`,
+  `EOG`, отмена, нехватка контекста, длинный префикс, формула бюджета, `isContinuable`).
+
+Проверено вручную на `emulator-5554` (`install -r`): ответ 1024 токена → `TRUNCATED`
++ кнопка; продолжение дописало в то же сообщение (`prefix=4884 bytes`, бюджет 933) и
+завершилось EOG/`COMPLETE`; прокрутка вверх во время стрима не сбивается, возврат к
+низу возобновляет фоллоу; после перезапуска история (6 сообщений) и продолженный текст
+на месте, `im_end`/`im_start` в файле нет. Юнит-тесты: 71, 0 failures; lint — успешно.
+
+**Не проверено на CPH2581 (`2d46124b`)** — устройство не было подключено. APK:
+`app\build\outputs\apk\debug\app-debug.apk`, 42 892 481 Б, SHA-256
+`C7FCE38A6B4214C67E4CD78E7DA32F816DC3B1EE4A250E7397E35C9DC64E088F`.
+
 ## Состояние на 2026-10-26 — M2 stability fix (CPH2581)
 
 Исправлены два дефекта, воспроизведённые на реальном OnePlus CPH2581 (`2d46124b`):

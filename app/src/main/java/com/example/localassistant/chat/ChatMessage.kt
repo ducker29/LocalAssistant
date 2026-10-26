@@ -32,3 +32,10 @@ data class ChatMessage(
     val status: MessageStatus = MessageStatus.COMPLETE,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+/**
+ * Only a non-empty assistant answer that was cut off by the output budget can be continued.
+ * Failed, interrupted and completed messages offer no continuation.
+ */
+val ChatMessage.isContinuable: Boolean
+    get() = role == Role.ASSISTANT && status == MessageStatus.TRUNCATED && text.isNotBlank()

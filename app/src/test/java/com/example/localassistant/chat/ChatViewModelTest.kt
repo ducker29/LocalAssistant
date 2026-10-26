@@ -93,6 +93,7 @@ class ChatViewModelTest {
         var promptTokens = 32
         var lastMessages: List<PromptMessage> = emptyList()
         var lastMaxTokens: Int? = null
+        var lastAssistantPrefix: String = ""
         var active: FakeGeneration? = null
 
         override suspend fun load(modelPath: String): Result<Unit> = Result.success(Unit)
@@ -104,9 +105,11 @@ class ChatViewModelTest {
             params: GenerationParams,
             onChunk: (String) -> Unit,
             onDone: (GenerationResult) -> Unit,
+            assistantPrefix: String,
         ): Job {
             lastMessages = messages
             lastMaxTokens = params.maxTokens
+            lastAssistantPrefix = assistantPrefix
             val generation = FakeGeneration(emptyList(), failure, onChunk, onDone)
             active = generation
             // Emit chunks up front (streaming), but DO NOT fire onDone yet — the test
@@ -129,7 +132,10 @@ class ChatViewModelTest {
             active?.cancel()
         }
 
-        override suspend fun countPromptTokens(messages: List<PromptMessage>): Int = promptTokens
+        override suspend fun countPromptTokens(
+            messages: List<PromptMessage>,
+            assistantPrefix: String,
+        ): Int = promptTokens
 
         override suspend fun close() = Unit
     }
@@ -417,6 +423,7 @@ class ChatViewModelTest {
             params: GenerationParams,
             onChunk: (String) -> Unit,
             onDone: (GenerationResult) -> Unit,
+            assistantPrefix: String,
         ): Job {
             val gen = FakeGeneration(emptyList(), null, onChunk, onDone)
             if (answer.isNotEmpty()) {
@@ -427,7 +434,10 @@ class ChatViewModelTest {
         }
 
         override fun cancelGeneration() = Unit
-        override suspend fun countPromptTokens(messages: List<PromptMessage>): Int = promptTokens
+        override suspend fun countPromptTokens(
+            messages: List<PromptMessage>,
+            assistantPrefix: String,
+        ): Int = promptTokens
         override suspend fun close() = Unit
     }
 
@@ -559,6 +569,146 @@ class ChatViewModelTest {
 
         assertEquals("Второй ответ", vm.state.value.messages.last().text)
         assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `is continuable only for a non-empty truncated assistant message`() {
+        val assistant = ChatMessage(1, Role.ASSISTANT, "часть", MessageStatus.TRUNCATED)
+        assertTrue(assistant.isContinuable)
+        assertFalse(assistant.copy(status = MessageStatus.COMPLETE).isContinuable)
+        assertFalse(assistant.copy(status = MessageStatus.INTERRUPTED).isContinuable)
+        assertFalse(assistant.copy(status = MessageStatus.FAILED).isContinuable)
+        assertFalse(assistant.copy(status = MessageStatus.STREAMING).isContinuable)
+        assertFalse(assistant.copy(text = "   ").isContinuable)
+        assertFalse(assistant.copy(role = Role.USER).isContinuable)
+    }
+
+    private fun truncatedViewModel(engine: FakeEngine): ChatViewModel {
+        val vm = viewModel(engine)
+        vm.onInputChange("Вопрос")
+        vm.send()
+        engine.finishWith(GenerationTermination.BUDGET)
+        assertEquals(MessageStatus.TRUNCATED, vm.state.value.messages.last().status)
+        return vm
+    }
+
+    @Test
+    fun `continuation appends to the same message and sends the prefix separately`() {
+        val engine = FakeEngine().apply { chunks = listOf("Частичный ответ") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.chunks = listOf(" и продолжение")
+        vm.continueGeneration(assistantId)
+        engine.finish()
+
+        val messages = vm.state.value.messages
+        assertEquals(2, messages.size)
+        assertEquals(1, messages.count { it.role == Role.USER })
+        assertEquals("Частичный ответ и продолжение", messages.last().text)
+        assertEquals(MessageStatus.COMPLETE, messages.last().status)
+        assertEquals("Частичный ответ", engine.lastAssistantPrefix)
+        assertTrue(engine.lastMessages.none { it.role == "assistant" })
+        assertFalse(vm.state.value.isGenerating)
+        assertNull(vm.state.value.continuationMessageId)
+    }
+
+    @Test
+    fun `continuation that exhausts the budget stays truncated`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.chunks = listOf(" ещё")
+        vm.continueGeneration(assistantId)
+        engine.finishWith(GenerationTermination.BUDGET)
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.TRUNCATED, assistant.status)
+        assertEquals("Часть ещё", assistant.text)
+        assertTrue(assistant.isContinuable)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `continuation cancellation is reported as interrupted`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.chunks = listOf(" ещё немного")
+        vm.continueGeneration(assistantId)
+        vm.stopGeneration()
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.INTERRUPTED, assistant.status)
+        assertFalse(assistant.isContinuable)
+        assertFalse(vm.state.value.isGenerating)
+        assertNull(vm.state.value.continuationMessageId)
+    }
+
+    @Test
+    fun `continuation budget calculation keeps the adaptive formula`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.chunks = listOf(" ещё")
+        engine.promptTokens = 1000
+        vm.continueGeneration(assistantId)
+        engine.finish()
+
+        assertEquals(1024, engine.lastMaxTokens)
+    }
+
+    @Test
+    fun `continuation of a long prefix still fits and uses the remaining budget`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        // 1200-token prompt + the full 1024-token CAP reservation would not fit in 2048,
+        // but a continuation only needs a minimal answer, so it must still proceed.
+        engine.chunks = listOf(" ещё")
+        engine.promptTokens = 1200
+        vm.continueGeneration(assistantId)
+        engine.finish()
+
+        assertEquals(2048 - 1200 - 8, engine.lastMaxTokens)
+        assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+        assertEquals("Часть ещё", vm.state.value.messages.last().text)
+    }
+
+    @Test
+    fun `continuation without room in the context keeps the message truncated`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.promptTokens = 100_000
+        vm.continueGeneration(assistantId)
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.TRUNCATED, assistant.status)
+        assertEquals("Недостаточно контекста для продолжения ответа", vm.state.value.error)
+        assertFalse(vm.state.value.isGenerating)
+        assertNull(vm.state.value.continuationMessageId)
+    }
+
+    @Test
+    fun `continuation context exhaustion keeps truncated and surfaces the error`() {
+        val engine = FakeEngine().apply { chunks = listOf("Часть") }
+        val vm = truncatedViewModel(engine)
+        val assistantId = vm.state.value.messages.last().id
+
+        engine.chunks = emptyList()
+        vm.continueGeneration(assistantId)
+        engine.finishWith(GenerationTermination.CONTEXT, "История не помещается в контекст модели")
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.TRUNCATED, assistant.status)
+        assertEquals("История не помещается в контекст модели", vm.state.value.error)
         assertFalse(vm.state.value.isGenerating)
     }
 

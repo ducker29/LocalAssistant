@@ -379,7 +379,8 @@ Java_com_example_localassistant_llm_LlmNative_nativeModelDescription(JNIEnv * en
 JNIEXPORT jint JNICALL
 Java_com_example_localassistant_llm_LlmNative_nativeCountPromptTokens(JNIEnv * env, jclass, jlong handle,
                                                                     jobjectArray roles,
-                                                                    jobjectArray contents) {
+                                                                    jobjectArray contents,
+                                                                    jstring assistant_prefix) {
     auto * h = reinterpret_cast<LlmHandle *>(handle);
     if (h == nullptr) {
         return -1;
@@ -395,6 +396,9 @@ Java_com_example_localassistant_llm_LlmNative_nativeCountPromptTokens(JNIEnv * e
     if (!render_prompt(*h, messages, prompt, supports_thinking, error)) {
         return -1;
     }
+    // Continuation renders the template normally (ending with the assistant generation prompt)
+    // and appends the already produced partial answer, so the prefix continues the same turn.
+    prompt += jstring_to_std(env, assistant_prefix);
     std::vector<llama_token> tokens;
     if (!tokenize_prompt(*h, prompt, tokens, error)) {
         return -1;
@@ -427,6 +431,7 @@ Java_com_example_localassistant_llm_LlmNative_nativeFormatPrompt(JNIEnv * env, j
 JNIEXPORT jstring JNICALL
 Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclass, jlong handle,
                                                              jobjectArray roles, jobjectArray contents,
+                                                             jstring assistant_prefix,
                                                              jint max_tokens, jfloat temperature,
                                                              jfloat top_p, jint top_k, jint seed,
                                                              jobject cancel_flag,
@@ -466,7 +471,12 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
     if (!render_prompt(*h, messages, prompt, supports_thinking, error)) {
         return std_to_jstring(env, error);
     }
-    LOGI("prompt: %zu bytes, thinking_supported=%d", prompt.size(), supports_thinking ? 1 : 0);
+    // See nativeCountPromptTokens: the template ends with the assistant generation prompt, so
+    // appending the partial answer makes the model continue that very turn.
+    const std::string prefix = jstring_to_std(env, assistant_prefix);
+    prompt += prefix;
+    LOGI("prompt: %zu bytes (prefix=%zu bytes), thinking_supported=%d",
+         prompt.size(), prefix.size(), supports_thinking ? 1 : 0);
 
     std::vector<llama_token> tokens;
     if (!tokenize_prompt(*h, prompt, tokens, error)) {

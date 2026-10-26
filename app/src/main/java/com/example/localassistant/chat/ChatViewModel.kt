@@ -26,6 +26,8 @@ data class ChatUiState(
     val isGenerating: Boolean = false,
     val droppedTurns: Int = 0,
     val error: String? = null,
+    /** Assistant message currently being continued, if any. */
+    val continuationMessageId: Long? = null,
 ) {
     val canSend: Boolean
         get() = input.isNotBlank() && model is ModelStatus.Ready && !isGenerating
@@ -108,6 +110,7 @@ class ChatViewModel(
                 isGenerating = true,
                 droppedTurns = 0,
                 error = null,
+                continuationMessageId = null,
             )
         }
         persist()
@@ -231,13 +234,143 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Continues a truncated assistant message in place: no new user/assistant pair is added.
+     * The already produced text is sent to the model as the assistant prefix, so the answer
+     * resumes exactly where the output budget stopped it.
+     */
+    fun continueGeneration(messageId: Long) {
+        val snapshot = _state.value
+        if (snapshot.isGenerating) return
+        val target = snapshot.messages.firstOrNull { it.id == messageId } ?: return
+        if (!target.isContinuable) return
+        if (snapshot.model !is ModelStatus.Ready) {
+            _state.update { it.copy(error = "Сначала подготовьте модель") }
+            return
+        }
+
+        val prefix = target.text
+        val turns = buildTurns(snapshot.messages.filter { it.id < messageId })
+        if (turns.isEmpty()) {
+            _state.update { it.copy(error = "Недостаточно контекста для продолжения ответа") }
+            return
+        }
+        cancelRequested = false
+        _state.update {
+            it.copy(
+                isGenerating = true,
+                continuationMessageId = messageId,
+                error = null,
+            )
+        }
+        persist()
+
+        generationJob = viewModelScope.launch {
+            val nativeContext = (snapshot.model as ModelStatus.Ready).contextTokens
+
+            // The planner counts the prefix as part of the prompt, so the window is fitted
+            // against the real continuation prompt. Oldest complete turns are dropped first.
+            // Unlike a fresh send, continuation only has to leave room for a minimal answer:
+            // the actual output budget is derived afterwards by computeMaxTokens, which caps
+            // it at whatever the window still allows. Reserving the full CAP_TOKENS here
+            // would reject continuations whose already-generated prefix is long.
+            val planner = ContextPlanner(
+                maxContextTokens = nativeContext,
+                reservedOutputTokens = MIN_OUTPUT_TOKENS,
+            )
+            val planned = try {
+                planner.plan(SYSTEM_PROMPT, turns) { messages ->
+                    engine.countPromptTokens(messages, prefix)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "continuation planning failed: ${t.message}")
+                null
+            }
+            if (planned == null || planned.messages.isEmpty()) {
+                _state.update {
+                    it.copy(
+                        isGenerating = false,
+                        continuationMessageId = null,
+                        error = "Недостаточно контекста для продолжения ответа",
+                    )
+                }
+                return@launch
+            }
+
+            val promptTokens = engine.countPromptTokens(planned.messages, prefix)
+            val maxTokens = computeMaxTokens(nativeContext, promptTokens, CAP_TOKENS, SAFETY_MARGIN)
+            Log.i(
+                TAG,
+                "continuation budget: n_ctx=$nativeContext, prompt=$promptTokens " +
+                    "tokens (prefix=${prefix.length} chars), max_tokens=$maxTokens",
+            )
+
+            val filter = ReasoningFilter()
+            val answer = StringBuilder(prefix)
+            var termination: GenerationTermination = GenerationTermination.CANCELLED
+            var errorMessage: String? = null
+            fun noteVisible(text: String) {
+                if (text.isEmpty()) return
+                answer.append(text)
+                updateMessageText(messageId, answer.toString())
+            }
+
+            val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val genJob = engine.generate(
+                planned.messages,
+                GenerationParams(maxTokens = maxTokens),
+                onChunk = { chunk -> noteVisible(filter.append(chunk)) },
+                onDone = { result ->
+                    noteVisible(filter.finish())
+                    termination = result.termination
+                    errorMessage = result.errorMessage
+                    done.complete(Unit)
+                },
+                assistantPrefix = prefix,
+            )
+            generationJob = genJob
+
+            try {
+                done.join()
+            } catch (t: Throwable) {
+                termination = GenerationTermination.ERROR
+                errorMessage = t.message ?: "Ошибка генерации"
+            }
+
+            val textOut = answer.toString()
+            val finalStatus = when (termination) {
+                GenerationTermination.CANCELLED -> MessageStatus.INTERRUPTED
+
+                GenerationTermination.BUDGET -> MessageStatus.TRUNCATED
+
+                GenerationTermination.CONTEXT -> {
+                    _state.update {
+                        it.copy(error = errorMessage ?: "Недостаточно контекста для продолжения ответа")
+                    }
+                    MessageStatus.TRUNCATED
+                }
+
+                GenerationTermination.ERROR -> {
+                    _state.update { it.copy(error = errorMessage ?: "Ошибка генерации") }
+                    MessageStatus.FAILED
+                }
+
+                GenerationTermination.EOG -> MessageStatus.COMPLETE
+            }
+            finishMessage(messageId, finalStatus, textOut)
+            _state.update {
+                it.copy(isGenerating = false, continuationMessageId = null)
+            }
+            Log.i(TAG, "continuation finished, termination=${termination.name}, status=$finalStatus")
+            persist()
+        }
+    }
+
     fun stopGeneration() {
         if (!_state.value.isGenerating) return
         cancelRequested = true
         engine.cancelGeneration()
-    }
-
-    fun newChat() {
+    }    fun newChat() {
         engine.cancelGeneration()
         generationJob = null
         viewModelScope.launch {
@@ -249,6 +382,7 @@ class ChatViewModel(
                     isGenerating = false,
                     droppedTurns = 0,
                     error = null,
+                    continuationMessageId = null,
                 )
             }
         }

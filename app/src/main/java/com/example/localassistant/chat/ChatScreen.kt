@@ -11,6 +11,8 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,9 +74,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
@@ -92,6 +97,7 @@ import com.example.localassistant.voice.VoicePanel
 import com.example.localassistant.voice.VoicePhase
 import com.example.localassistant.voice.VoiceUiState
 import com.example.localassistant.voice.WhisperModelPanel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -103,6 +109,7 @@ fun ChatScreen(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onContinue: (Long) -> Unit,
     onNewChat: () -> Unit,
     onDownloadModel: () -> Unit,
     onCancelDownload: () -> Unit,
@@ -313,10 +320,13 @@ fun ChatScreen(
         ) {
             MessageList(
                 messages = state.messages,
+                isGenerating = state.isGenerating,
+                continuationMessageId = state.continuationMessageId,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 onCopy = copyToClipboard,
+                onContinue = onContinue,
             )
 
             if (state.droppedTurns > 0) {
@@ -392,24 +402,67 @@ fun ChatScreen(
 @Composable
 private fun MessageList(
     messages: List<ChatMessage>,
+    isGenerating: Boolean,
+    continuationMessageId: Long?,
     modifier: Modifier = Modifier,
     onCopy: (String) -> Unit,
+    onContinue: (Long) -> Unit,
 ) {
     val listState = rememberLazyListState()
 
-    val isAtBottom by remember {
+    // The list follows new output only while the user keeps the view at the bottom. Any
+    // manual drag turns following off; reaching the bottom again turns it back on.
+    var autoFollow by remember { mutableStateOf(true) }
+    val bottomThreshold = with(LocalDensity.current) { 72.dp.roundToPx() }
+
+    val isAtBottom by remember(bottomThreshold) {
         derivedStateOf {
             val info = listState.layoutInfo
             val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
             lastVisible.index >= info.totalItemsCount - 1 &&
-                lastVisible.offset + lastVisible.size <= info.viewportEndOffset + 24
+                (lastVisible.offset + lastVisible.size) - info.viewportEndOffset <= bottomThreshold
+        }
+    }
+
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is DragInteraction.Start -> autoFollow = false
+                is DragInteraction.Stop, is DragInteraction.Cancel -> autoFollow = isAtBottom
+                else -> Unit
+            }
+        }
+    }
+
+    // Re-enable following only when the user is genuinely at the bottom and not dragging.
+    // Content growth itself never disables following.
+    LaunchedEffect(listState, bottomThreshold) {
+        snapshotFlow { isAtBottom }.collect { atBottom ->
+            if (atBottom && !listState.isScrollInProgress) autoFollow = true
         }
     }
 
     val lastTextLength = messages.lastOrNull()?.text?.length ?: 0
-    LaunchedEffect(messages.size, lastTextLength) {
-        if (messages.isNotEmpty() && isAtBottom) {
-            listState.animateScrollToItem(messages.lastIndex)
+    val lastStatus = messages.lastOrNull()?.status
+    LaunchedEffect(messages.size, lastTextLength, lastStatus, autoFollow) {
+        if (messages.isEmpty() || !autoFollow) return@LaunchedEffect
+        // Wait for the new text to be measured so the follow distance is computed against
+        // the current layout, not the previous frame's.
+        withFrameNanos { }
+        val total = listState.layoutInfo.totalItemsCount
+        if (total == 0) return@LaunchedEffect
+        val lastIndex = total - 1
+        val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+        if (visible == null || visible.index < lastIndex) {
+            listState.scrollToItem(lastIndex)
+        }
+        // A tall last message can still overflow the viewport after scrollToItem, so align
+        // its bottom edge explicitly. scrollBy is clamped by the list's scroll bounds.
+        val info = listState.layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: return@LaunchedEffect
+        if (last.index >= info.totalItemsCount - 1) {
+            val overshoot = (last.offset + last.size) - info.viewportEndOffset
+            if (overshoot > 0) listState.scrollBy(overshoot.toFloat())
         }
     }
 
@@ -433,13 +486,25 @@ private fun MessageList(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(items = messages, key = { it.id }) { message ->
-            MessageBubble(message = message, onCopy = onCopy)
+            MessageBubble(
+                message = message,
+                isGenerating = isGenerating,
+                isContinuing = continuationMessageId == message.id,
+                onCopy = onCopy,
+                onContinue = onContinue,
+            )
         }
     }
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, onCopy: (String) -> Unit) {
+private fun MessageBubble(
+    message: ChatMessage,
+    isGenerating: Boolean,
+    isContinuing: Boolean,
+    onCopy: (String) -> Unit,
+    onContinue: (Long) -> Unit,
+) {
     val isUser = message.role == Role.USER
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -478,11 +543,25 @@ private fun MessageBubble(message: ChatMessage, onCopy: (String) -> Unit) {
             }
         }
         if (!isUser && message.text.isNotBlank() && message.status != MessageStatus.STREAMING) {
-            TextButton(
-                onClick = { onCopy(message.text) },
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-            ) {
-                Text("Копировать", style = MaterialTheme.typography.labelSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = { onCopy(message.text) },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text("Копировать", style = MaterialTheme.typography.labelSmall)
+                }
+                if (message.isContinuable) {
+                    TextButton(
+                        onClick = { onContinue(message.id) },
+                        enabled = !isGenerating,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            text = if (isContinuing && isGenerating) "Продолжаем…" else "Продолжить",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
             }
         }
     }

@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
                     onInputChange = chatViewModel::onInputChange,
                     onSend = chatViewModel::send,
                     onStop = chatViewModel::stopGeneration,
+                    onContinue = chatViewModel::continueGeneration,
                     onNewChat = chatViewModel::newChat,
                     onDownloadModel = chatViewModel::downloadModel,
                     onCancelDownload = chatViewModel::cancelDownload,
