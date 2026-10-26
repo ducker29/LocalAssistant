@@ -120,6 +120,11 @@ class ChatViewModelTest {
             active?.complete()
         }
 
+        /** Fire [onDone] with an explicit termination, keeping the chunks emitted so far. */
+        fun finishWith(termination: GenerationTermination, errorMessage: String? = null) {
+            active?.fireTermination(termination, errorMessage = errorMessage)
+        }
+
         override fun cancelGeneration() {
             active?.cancel()
         }
@@ -401,6 +406,7 @@ class ChatViewModelTest {
         override val state = MutableStateFlow<EngineState>(EngineState.Ready("fake", 2048))
         var termination: GenerationTermination = GenerationTermination.BUDGET
         var errorMessage: String? = null
+        var answer: String = "Частичный ответ"
         var promptTokens = 32
 
         override suspend fun load(modelPath: String): Result<Unit> = Result.success(Unit)
@@ -413,8 +419,10 @@ class ChatViewModelTest {
             onDone: (GenerationResult) -> Unit,
         ): Job {
             val gen = FakeGeneration(emptyList(), null, onChunk, onDone)
-            gen.emit("Частичный ответ")
-            gen.fireTermination(termination, "Частичный ответ", errorMessage)
+            if (answer.isNotEmpty()) {
+                gen.emit(answer)
+            }
+            gen.fireTermination(termination, answer, errorMessage)
             return gen.handle()
         }
 
@@ -451,6 +459,107 @@ class ChatViewModelTest {
         assertEquals(MessageStatus.INTERRUPTED, deriveStatusFor(GenerationTermination.CANCELLED, "обрывок"))
         assertEquals(MessageStatus.FAILED, deriveStatusFor(GenerationTermination.ERROR, "x"))
         assertEquals(MessageStatus.FAILED, deriveStatusFor(GenerationTermination.EOG, ""))
+    }
+
+    @Test
+    fun `context exhaustion with no answer fails and surfaces the error`() {
+        val engine = BudgetFakeEngine().apply {
+            termination = GenerationTermination.CONTEXT
+            answer = ""
+            errorMessage = "История не помещается в контекст модели"
+        }
+        val vm = ChatViewModel(engine, FakeGateway(), MemoryPersistence())
+
+        vm.onInputChange("Очень длинная история")
+        vm.send()
+
+        val assistant = vm.state.value.messages.last()
+        assertEquals(MessageStatus.FAILED, assistant.status)
+        assertEquals("История не помещается в контекст модели", vm.state.value.error)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `repeated send after a completed response keeps working`() {
+        val engine = FakeEngine().apply { chunks = listOf("Первый ответ") }
+        val vm = viewModel(engine)
+
+        vm.onInputChange("Первый вопрос")
+        vm.send()
+        engine.finish()
+        assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+
+        engine.chunks = listOf("Второй ответ")
+        vm.onInputChange("Второй вопрос")
+        vm.send()
+        engine.finish()
+
+        val messages = vm.state.value.messages
+        assertEquals(2, messages.count { it.role == Role.USER })
+        assertEquals("Второй ответ", messages.last().text)
+        assertEquals(MessageStatus.COMPLETE, messages.last().status)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `repeated send after cancellation keeps working`() {
+        val engine = FakeEngine().apply { chunks = listOf("обрывок") }
+        val vm = viewModel(engine)
+
+        vm.onInputChange("Первый вопрос")
+        vm.send()
+        vm.stopGeneration()
+        engine.active?.complete()
+        assertEquals(MessageStatus.INTERRUPTED, vm.state.value.messages.last().status)
+
+        engine.chunks = listOf("Второй ответ")
+        vm.onInputChange("Второй вопрос")
+        vm.send()
+        engine.finish()
+
+        assertEquals("Второй ответ", vm.state.value.messages.last().text)
+        assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `repeated send after truncation keeps working`() {
+        val engine = FakeEngine().apply { chunks = listOf("Частичный ответ") }
+        val vm = viewModel(engine)
+
+        vm.onInputChange("Первый вопрос")
+        vm.send()
+        engine.finishWith(GenerationTermination.BUDGET)
+        assertEquals(MessageStatus.TRUNCATED, vm.state.value.messages.last().status)
+
+        engine.chunks = listOf("Полный второй ответ")
+        vm.onInputChange("Второй вопрос")
+        vm.send()
+        engine.finish()
+
+        assertEquals("Полный второй ответ", vm.state.value.messages.last().text)
+        assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+        assertFalse(vm.state.value.isGenerating)
+    }
+
+    @Test
+    fun `repeated send after a failed response keeps working`() {
+        val engine = FakeEngine().apply { chunks = listOf("до ошибки") }
+        val vm = viewModel(engine)
+
+        vm.onInputChange("Первый вопрос")
+        vm.send()
+        engine.finishWith(GenerationTermination.ERROR, "сбой инференса")
+        assertEquals(MessageStatus.FAILED, vm.state.value.messages.last().status)
+
+        engine.chunks = listOf("Второй ответ")
+        vm.onInputChange("Второй вопрос")
+        vm.send()
+        engine.finish()
+
+        assertEquals("Второй ответ", vm.state.value.messages.last().text)
+        assertEquals(MessageStatus.COMPLETE, vm.state.value.messages.last().status)
+        assertFalse(vm.state.value.isGenerating)
     }
 
     private fun deriveStatusFor(termination: GenerationTermination, text: String): MessageStatus =

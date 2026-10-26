@@ -8,6 +8,7 @@
 
 #include <android/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -34,6 +35,7 @@ struct LlmHandle {
     const llama_vocab *     vocab     = nullptr;
     common_chat_templates_ptr templates;
     int32_t                 n_ctx     = 0;
+    int32_t                 n_batch   = 512;
     bool                    loaded    = false;
 };
 
@@ -301,6 +303,12 @@ Java_com_example_localassistant_llm_LlmNative_nativeLoadModel(JNIEnv * env, jcla
         return std_to_jstring(env, "Не удалось создать контекст инференса (недостаточно памяти?)");
     }
     h->n_ctx = static_cast<int32_t>(llama_n_ctx(h->ctx));
+    // llama_decode asserts that a batch never exceeds n_batch, so prompt prefills must be
+    // split into chunks of at most this size instead of decoded in one call.
+    h->n_batch = static_cast<int32_t>(cp.n_batch);
+    if (h->n_batch <= 0) {
+        h->n_batch = 512;
+    }
 
     try {
         h->templates = common_chat_templates_init(h->model, "", "", "");
@@ -465,7 +473,7 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
         return std_to_jstring(env, error);
     }
     if (static_cast<int32_t>(tokens.size()) + 8 >= h->n_ctx) {
-        return std_to_jstring(env, "История не помещается в контекст модели");
+        return std_to_jstring(env, "CONTEXTEXHAUSTED|История не помещается в контекст модели");
     }
 
     int32_t budget = max_tokens;
@@ -484,10 +492,18 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
 
     llama_memory_clear(llama_get_memory(h->ctx), true);
 
-    llama_batch batch = llama_batch_get_one(tokens.data(), static_cast<int32_t>(tokens.size()));
-    if (llama_decode(h->ctx, batch) != 0) {
-        LOGE("prompt decode failed: %zu tokens, n_ctx=%d", tokens.size(), h->n_ctx);
-        return std_to_jstring(env, "Ошибка декодирования промпта");
+    // llama_decode aborts when a single batch exceeds n_batch, so prefill the prompt in
+    // chunks of at most n_batch tokens. Positions are assigned automatically (continuing
+    // from n_past), and only the final chunk's last token needs to be sampled.
+    const int32_t total_prompt = static_cast<int32_t>(tokens.size());
+    for (int32_t offset = 0; offset < total_prompt; offset += h->n_batch) {
+        const int32_t count = std::min(h->n_batch, total_prompt - offset);
+        llama_batch chunk = llama_batch_get_one(tokens.data() + offset, count);
+        if (llama_decode(h->ctx, chunk) != 0) {
+            LOGE("prompt decode failed: tokens=%d, offset=%d, chunk=%d, n_batch=%d, n_ctx=%d",
+                 total_prompt, offset, count, h->n_batch, h->n_ctx);
+            return std_to_jstring(env, "ERROR|Ошибка декодирования промпта");
+        }
     }
     const auto prompt_ready = std::chrono::steady_clock::now();
     LOGI("prompt ready: %zu tokens in %lld ms (render+tokenize+decode)",
@@ -557,19 +573,15 @@ Java_com_example_localassistant_llm_LlmNative_nativeGenerate(JNIEnv * env, jclas
 
         const llama_token id = llama_sampler_sample(smpl, h->ctx, -1);
         if (llama_vocab_is_eog(h->vocab, id)) {
-            // Emit the EOG piece (typically the newline that ends the turn) so the model's
-            // output is not silently truncated before its final line break.
-            const int32_t eog_len = llama_token_to_piece(
-                    h->vocab, id, piece, sizeof(piece), 0, /*special=*/true);
-            emit_piece(piece, eog_len);
-            if (!result_error.empty()) {
-                break;
-            }
+            // Never render the EOG token itself: for chat models it is a control token such
+            // as Qwen's "<|im_end|>", which must not leak into the visible answer or history.
             terminated_by_eog = true;
             break;
         }
 
-        const int32_t n = llama_token_to_piece(h->vocab, id, piece, sizeof(piece), 0, /*special=*/true);
+        // special=false suppresses control/unknown tokens, so no special token can reach the
+        // streaming callback even if the sampler emits one that is not a stop token.
+        const int32_t n = llama_token_to_piece(h->vocab, id, piece, sizeof(piece), 0, /*special=*/false);
         emit_piece(piece, n);
         if (!result_error.empty()) {
             break;

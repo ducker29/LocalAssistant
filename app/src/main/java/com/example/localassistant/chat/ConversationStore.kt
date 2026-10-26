@@ -1,5 +1,6 @@
 package com.example.localassistant.chat
 
+import com.example.localassistant.llm.SpecialTokenFilter
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,7 +28,7 @@ class ConversationStore(filesDir: File) : ConversationPersistence {
                     ChatMessage(
                         id = item.optLong("id", i.toLong()),
                         role = Role.fromWire(item.optString("role", "assistant")),
-                        text = item.optString("text", ""),
+                        text = SpecialTokenFilter.strip(item.optString("text", "")),
                         status = if (status == MessageStatus.STREAMING) {
                             MessageStatus.INTERRUPTED
                         } else {

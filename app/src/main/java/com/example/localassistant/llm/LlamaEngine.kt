@@ -101,6 +101,7 @@ class LlamaEngine(
         val cancelFlag = AtomicBoolean(false)
         activeCancel.set(cancelFlag)
         val text = StringBuilder()
+        val specialFilter = SpecialTokenFilter()
         var reported = AtomicBoolean(false)
         var job: Job? = null
 
@@ -126,10 +127,18 @@ class LlamaEngine(
                     params.seed,
                     cancelFlag,
                     LlmNative.TokenCallback { chunk ->
-                        text.append(chunk)
-                        onChunk(chunk)
+                        val visible = specialFilter.append(chunk)
+                        if (visible.isNotEmpty()) {
+                            text.append(visible)
+                            onChunk(visible)
+                        }
                     },
                 )
+                val tail = specialFilter.finish()
+                if (tail.isNotEmpty()) {
+                    text.append(tail)
+                    onChunk(tail)
+                }
                 val parsed = parseTermination(raw)
                 if (parsed.termination == GenerationTermination.ERROR) {
                     Log.e(TAG, "generation failed: ${parsed.errorMessage}")
@@ -149,24 +158,6 @@ class LlamaEngine(
             }
         }
         return job
-    }
-
-    /**
-     * Maps the native termination string to a [GenerationTermination]. The native side always
-     * returns a non-null code; a null/blank value is treated defensively as EOG.
-     */
-    private fun parseTermination(raw: String?): GenerationResult {
-        val code = raw?.substringBefore('|', "")?.trim()?.ifBlank { "EOG" } ?: "EOG"
-        val message = raw?.substringAfter('|', "")?.takeIf { it.isNotBlank() }
-        return when (code) {
-            "EOG" -> GenerationResult("", GenerationTermination.EOG)
-            "BUDGET" -> GenerationResult("", GenerationTermination.BUDGET)
-            "CANCELLED" -> GenerationResult("", GenerationTermination.CANCELLED)
-            "CONTEXTEXHAUSTED" ->
-                GenerationResult("", GenerationTermination.CONTEXT, message)
-            "ERROR" -> GenerationResult("", GenerationTermination.ERROR, message)
-            else -> GenerationResult("", GenerationTermination.ERROR, "Неизвестный код завершения: $code")
-        }
     }
 
     override fun cancelGeneration() {
@@ -217,6 +208,30 @@ class LlamaEngine(
         const val DEFAULT_CONTEXT_TOKENS = 2048
         const val BATCH_TOKENS = 512
         const val DEFAULT_MAX_RESPONSE_TOKENS = 256
+
+        /**
+         * Maps the native termination string to a [GenerationTermination]. The native side
+         * always returns a non-null code; a null/blank value is treated defensively as EOG.
+         * Codes without a `|` payload ("EOG", "BUDGET", "CANCELLED") must keep their own code
+         * instead of falling back to EOG.
+         */
+        internal fun parseTermination(raw: String?): GenerationResult {
+            val code = raw?.substringBefore('|')?.trim()?.ifBlank { "EOG" } ?: "EOG"
+            val message = raw?.substringAfter('|', "")?.takeIf { it.isNotBlank() }
+            return when (code) {
+                "EOG" -> GenerationResult("", GenerationTermination.EOG)
+                "BUDGET" -> GenerationResult("", GenerationTermination.BUDGET)
+                "CANCELLED" -> GenerationResult("", GenerationTermination.CANCELLED)
+                "CONTEXTEXHAUSTED" ->
+                    GenerationResult("", GenerationTermination.CONTEXT, message)
+                "ERROR" -> GenerationResult("", GenerationTermination.ERROR, message)
+                else -> GenerationResult(
+                    "",
+                    GenerationTermination.ERROR,
+                    "Неизвестный код завершения: $code",
+                )
+            }
+        }
 
         private fun defaultThreadCount(): Int {
             val cores = Runtime.getRuntime().availableProcessors()
