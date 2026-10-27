@@ -1,5 +1,57 @@
 # Текущее состояние проекта
 
+## Календарь: явная проверка по кнопке (2026-10-27) — собрано, ждёт ручной проверки на телефоне
+
+Убраны две причины «бесконечной проверки»:
+1. `CalendarAuthManager.initialState()` больше не ставит `Checking` при наличии
+   сохранённого токена: состояние восстанавливается из локальных данных
+   (`Disconnected` / `NeedsReconnect` / `Connected(email)`).
+2. `ChatScreen` больше не запускает `checkConnection()` автоматически при открытии
+   вкладки «Календарь». Проверка выполняется только по кнопке «Проверить».
+
+Добавлено:
+- `CalendarAuthManager.cancelCheck()` — отменяет активную проверку, инкрементит
+   generation (поздние GMS-колбэки отбрасываются), восстанавливает состояние из
+   сохранённых данных; отмена НЕ считается ошибкой авторизации.
+- `checkConnection()` ловит `CancellationException` и таймаут отдельно; в обоих
+  случаях состояние восстанавливается из локальных данных, а не падает в `Checking`.
+- `CalendarViewModel.checkConnection()` / `cancelCheck()` — явные действия UI.
+- Ветка `Checking` в `CalendarSettingsCard`: индикатор + disabled «Проверить» +
+  enabled «Отменить проверку». Заголовок карточки — «Google-аккаунт».
+- `MainActivity` пробрасывает `onCalendarCheck` и `onCalendarCancelCheck`.
+
+Проверки: `:app:assembleDebug` — успешно (4 с). Устанавливать/тестировать на
+устройстве — задача пользователя. Коммит не создавался.
+
+## Calendar auth lifecycle (2026-10-27) — код готов, проверка на телефоне впереди
+
+Исправлены два дефекта авторизации Google Календаря:
+1. Settings больше не выводит «Подключён» из сохранённого токена: статус строится только
+   после `AuthorizationClient.authorize()`; resolution → `NeedsReconnect`, offline →
+   `Unavailable`, успех → `Connected`. Ложный `expiresAt` удалён (schema v3).
+2. «Отключить» → «Подключить» снова работает: `disconnect` очищает локальное состояние,
+   вызывает `clearToken`, затем best-effort `revokeAccess(Account)`; `connect` заново
+   вызывает `authorize()` и при необходимости запускает consent. Late-callback после
+   disconnect отбрасывается по generation.
+
+Дополнительно: единая точка получения токена (`ensureToken`) перед каждой операцией;
+401 инвалидирует токен и повторяет только идемпотентные чтения; записи не повторяются;
+403 разделён на rate-limit / configuration / forbidden. Зависимость
+`play-services-auth` поднята 21.3.0 → 21.4.0 (в 21.3.0 нет `ClearTokenRequest`,
+`RevokeAccessRequest`, `clearToken`, `revokeAccess`; проверено по AAR и `javap`).
+
+Первый прогон на CPH2581 показал `googleRevoked=false`: Authorization API не сообщает
+email, а `revokeAccess` требует `Account`. Добавлен системный `AccountPicker` (без новых
+разрешений) и `setAccount`; выбранный email сохраняется и используется для revoke.
+Старые сессии без email требуют повторного выбора аккаунта.
+
+Проверки: `:app:compileDebugKotlin`, `:app:testDebugUnitTest` (76 тестов, 0 failures;
+добавлены 5 тестов `AuthorizedCalendarGatewayTest`), `:app:assembleDebug`,
+`:app:lintDebug` — успешно. Новая сборка с AccountPicker на телефон ещё не установлена;
+нужен `install -r` и ручной сценарий connect → disconnect → check → connect.
+Планировщик календаря (0 символов ответа / переполнение контекста) остаётся отдельной
+задачей.
+
 ## Веха
 M1 завершена, M2 в основном реализована и проверена на эмуляторе, M3 (STT) реализована
 и проверена на эмуляторе. Приложение — офлайн-чат на локальной Qwen3-1.7B Q4_K_M через

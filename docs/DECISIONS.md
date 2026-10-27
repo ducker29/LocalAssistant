@@ -134,6 +134,27 @@ JNI-символов, 0 символов ggml/whisper, `NEEDED` только lib
 метки как есть (пользователь может отправить мусор).
 Проверка: `AsrTranscriptTest`, ручной прогон тишины в UI на эмуляторе.
 
+## D015 — Calendar auth: AuthorizationClient без выдуманного срока и с revoke
+Статус: принято (2026-10-27), зависимость поднята с разрешения пользователя.
+Контекст: Settings показывал «Подключён» по сохранённому токену; disconnect не отзывал
+доступ и не сбрасывал GMS-кэш, поэтому повторное подключение ломалось. В
+`play-services-auth:21.3.0` отсутствуют `ClearTokenRequest`, `RevokeAccessRequest`,
+`clearToken()` и `revokeAccess()` (подтверждено AAR и `javap`).
+Решение: `play-services-auth` 21.4.0; состояние связи строится только по результату
+`AuthorizationClient.authorize()`; срок жизни токена не изобретается; 401 — единственный
+сигнал замены токена; `disconnect` = локальная очистка + `clearToken` + best-effort
+`revokeAccess` (для аккаунта и scope `calendar.events`); `connect` всегда заново
+`authorize`; late-callback отбрасывается по generation.
+Альтернативы: `GoogleSignInClient`/`requestIdToken` (запрещено условием), хранить
+`expiresAt` (нельзя проверить без выдумки), не отзывать доступ (оставляет grant).
+Аккаунт: Authorization API не возвращает identity, `toGoogleSignInAccount()` в этом
+сценарии даёт null. Поэтому при подключении открывается системный `AccountPicker`
+(без `GET_ACCOUNTS` и без Google Sign-In), выбранный email сохраняется,
+`AuthorizationRequest.setAccount` привязывает consent к аккаунту.
+Последствия: при обновлении схемы токен-стора пользователь один раз подключается заново;
+`revokeAccess` отзывает все ранее выданные этому приложению scope для аккаунта.
+Проверка: `AuthorizedCalendarGatewayTest`; сборка/тесты/lint; сценарий на CPH2581.
+
 ## Формат нового решения
 ID и дата; статус (предложено/принято/заменено); контекст; решение; альтернативы; последствия; способ проверки.
 Не удалять старые решения: помечать заменёнными с указанием нового ID.

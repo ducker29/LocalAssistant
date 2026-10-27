@@ -6,6 +6,12 @@ import android.content.Context
 import com.example.localassistant.asr.WhisperEngine
 import com.example.localassistant.asr.WhisperModelStore
 import com.example.localassistant.asr.WhisperRepository
+import com.example.localassistant.calendar.AuthorizedCalendarGateway
+import com.example.localassistant.calendar.CalendarAuthManager
+import com.example.localassistant.calendar.CalendarGateway
+import com.example.localassistant.calendar.CalendarToolExecutor
+import com.example.localassistant.calendar.CalendarTokenStore
+import com.example.localassistant.calendar.HttpCalendarGateway
 import com.example.localassistant.chat.ConversationStore
 import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
@@ -28,6 +34,20 @@ class AppContainer(context: Context) {
         store = whisperStore,
         engine = whisperEngine,
         contentResolver = context.contentResolver,
+    )
+
+    val calendarTokenStore = CalendarTokenStore(context.applicationContext)
+    val calendarAuthManager = CalendarAuthManager(context.applicationContext, calendarTokenStore)
+    private val httpCalendarGateway = HttpCalendarGateway(
+        tokenProvider = { calendarAuthManager.currentToken() }
+    )
+    val calendarGateway: CalendarGateway = AuthorizedCalendarGateway(
+        delegate = httpCalendarGateway,
+        auth = calendarAuthManager,
+    )
+    val calendarExecutor = CalendarToolExecutor(
+        gateway = calendarGateway,
+        is_connected = { calendarAuthManager.currentToken() != null },
     )
 }
 

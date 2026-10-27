@@ -1,5 +1,97 @@
 # Передача контекста проекта
 
+## Состояние на 2026-10-27 — явная проверка Google-аккаунта (ждёт ручной проверки)
+
+Где остановились: исправлено «бесконечное Checking». Две причины, обе устранены:
+1. `CalendarAuthManager.initialState()` ставил `Checking` при наличии сохранённого
+   токена — теперь восстанавливает `Connected(email)` / `NeedsReconnect` /
+   `Disconnected` из локальных данных (`restoredStateFromRetainedData()`).
+2. `ChatScreen` запускал `onSettingsOpened()` через `LaunchedEffect` при открытии
+   вкладки «Календарь» — убрано. Проверка только по кнопке «Проверить».
+
+Изменения (все в `app/src/main/java/com/example/localassistant/`):
+- `calendar/CalendarAuthManager.kt`: `initialState()` → restored-state;
+  `cancelCheck()` (generation++ отбрасывает поздние колбэки); `checkConnection()`
+  ловит `CancellationException` отдельно от таймаута, оба случая восстанавливают
+  состояние из локальных данных (отмена ≠ ошибка авторизации).
+- `calendar/CalendarViewModel.kt`: `onSettingsOpened()` заменён на `checkConnection()`
+  + `cancelCheck()` (отменяет job и вызывает `authManager.cancelCheck()`).
+- `chat/ChatScreen.kt`: удалён авто-LaunchedEffect; новые параметры
+  `onCalendarCheck` / `onCalendarCancelCheck`, проброшены в `SettingsDialog`.
+- `settings/SettingsScreen.kt`: заголовок карточки «Google-аккаунт»; ветка
+  `Checking` — индикатор + disabled «Проверить» + enabled «Отменить проверку»;
+  `CalendarSettingsCard` получил `onCancelCheck`.
+- `MainActivity.kt`: `onCalendarCheck = { calendarViewModel.checkConnection() }`,
+  `onCalendarCancelCheck = { calendarViewModel.cancelCheck() }`.
+
+Проверено: `.\gradlew.bat :app:assembleDebug` — успешно (4 с). На устройство
+**не устанавливалось**, adb-команд не запускалось, тестов не добавлялось.
+Коммит не создавался.
+
+Следующий шаг (пользователь): установить APK и вручную проверить:
+1. Настройки → Календарь — карточка «Google-аккаунт», автотеста при открытии нет.
+2. Кнопка «Проверить» → состояние `Checking` с disabled «Проверить» и
+   «Отменить проверку»; «Отменить проверку» возвращает рабочее состояние
+   (Connected/NeedsReconnect/Disconnected по сохранённым данным), не зависает.
+3. Остальные ветки: `Disconnected` — «Подключить Google-аккаунт»;
+   `Connected` — email + «Проверить» + «Отключить»; `NeedsReconnect`/`Unavailable`/
+   `Error` — «Подключить Google-аккаунт» + «Проверить».
+
+## Состояние на 2026-10-27 — Calendar auth lifecycle
+
+Где остановились: после первого ручного прогона лог показал
+`disconnect: tokenCleared=true, googleRevoked=false`. Причина: Authorization API не
+сообщает email аккаунта (`email=unavailable`), поэтому `revokeAccess` не вызывался.
+Добавлен системный `AccountPicker` без новых разрешений: выбранный email сохраняется,
+`AuthorizationRequest.setAccount(...)` привязывает запрос к аккаунту, `disconnect`
+отзывает именно его. Аккаунт теперь обязателен: старые сессии без email переводятся в
+`NeedsReconnect` и требуют повторного выбора.
+
+Локальные проверки после правки: `:app:testDebugUnitTest` (76, 0 failures),
+`:app:assembleDebug`, `:app:lintDebug` — успешно. Новая сборка на телефон **не
+устанавливалась**: нужен `adb -s 2d46124b install -r` и ручной прогон:
+1. Настройки → Календарь → «Подключить» → выбрать Google-аккаунт → при необходимости
+   consent → ожидается «Подключён».
+2. «Отключить» → в логе ожидается `googleRevoked=true`.
+3. «Проверить» → ожидается `checkConnection: skipped (disabled or user-disconnected)`,
+   статус остаётся «Не подключён».
+4. «Подключить» снова → выбрать аккаунт → «Подключён».
+
+Изменено:
+- `calendar/CalendarAuthManager.kt`: `Checking/Connected/NeedsReconnect/Unavailable/Error`,
+  `ensureToken` (silent `authorize`, без UI), `checkConnection`, `connect` через
+  Activity-scoped client, `handleConsentResult`, `invalidateRejectedToken` (`clearToken`),
+  `disconnect` (`clearToken` + best-effort `revokeAccess`), generation против late-callback.
+- `calendar/CalendarTokenStore.kt`: schema v3, без выдуманного `expiresAt`; `enabled`,
+  `user_disconnected`.
+- `calendar/AuthorizedCalendarGateway.kt` (новый): единый токен перед вызовом; 401 →
+  инвалидация и один повтор только для list/search/get; записи не повторяются.
+- `calendar/HttpCalendarGateway.kt`: типизированные `CalendarApiException`; 401/403
+  (rate limit / configuration / forbidden / server / network).
+- `calendar/CalendarGateway.kt`: `CalendarApiError.Configuration`, payload-типы, исключения.
+- `calendar/CalendarToolExecutor.kt`: `mapFailure(t, isWrite)`; ошибка GET при update/delete
+  больше не выдаётся за «не найдено».
+- `calendar/CalendarViewModel.kt`: `ConsentRequest(id, …)`, реальные `statusNote` /
+  `calendarSettingsPrompt`, `onSettingsOpened`, сброс `isAuthorizing` в `finally`.
+- `MainActivity.kt`, `ChatScreen.kt`, `SettingsScreen.kt`, `LocalAssistantApp.kt`: запуск
+  consent, проверка при открытии настроек, карточки состояний, единое DI.
+- `gradle/libs.versions.toml`: `play-services-auth` 21.3.0 → 21.4.0 (разрешено
+  пользователем; в 21.3.0 нужных классов нет).
+- `app/src/test/.../calendar/AuthorizedCalendarGatewayTest.kt`: 5 тестов политики retry.
+
+Проверено: `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:assembleDebug`,
+`:app:lintDebug` — успешно. На телефоне ещё нет.
+
+Следующий шаг: разрешение на установку, затем сценарий:
+1. Открыть настройки → Календарь: статус не «Подключён» при отсутствии валидного grant.
+2. «Подключить» → consent → «Подключён».
+3. «Отключить» → «Подключить» → consent/прямой токен → снова «Подключён».
+4. Повторить disconnect/reconnect 2–3 раза; проверить, что запоздавший consent не
+   возвращает «Подключён».
+5. В чате: «Что у меня завтра в календаре?» — отдельная известная проблема планировщика.
+
+Не делать без разрешения: commit, push, установка APK, удаление данных/моделей.
+
 ## Состояние на 2026-10-26 — продолжение ответа и стабильный автоскролл
 
 Реализовано продолжение `TRUNCATED`-ответа и переработан автоскролл. Изменения

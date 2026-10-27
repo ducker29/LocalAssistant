@@ -76,11 +76,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -91,6 +92,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.example.localassistant.R
 import com.example.localassistant.asr.WhisperModelStatus
+import com.example.localassistant.calendar.CalendarConnectionState
+import com.example.localassistant.calendar.CalendarToolRequest
+import com.example.localassistant.calendar.CalendarViewModel
 import com.example.localassistant.model.ModelSpec
 import com.example.localassistant.model.ModelStatus
 import com.example.localassistant.voice.VoicePanel
@@ -99,6 +103,7 @@ import com.example.localassistant.voice.VoiceUiState
 import com.example.localassistant.voice.WhisperModelPanel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import java.time.ZoneId
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,6 +111,7 @@ import java.util.Locale
 fun ChatScreen(
     state: ChatUiState,
     voice: VoiceUiState,
+    calendar: CalendarViewModel,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
@@ -132,19 +138,36 @@ fun ChatScreen(
     onWhisperImport: (Uri) -> Unit,
     onWhisperDelete: () -> Unit,
     onWhisperRetry: () -> Unit,
+    onCalendarConnect: () -> Unit,
+    onCalendarDisconnect: () -> Unit,
+    onCalendarCheck: () -> Unit,
+    onCalendarCancelCheck: () -> Unit,
+    onCalendarConfirm: () -> Unit,
+    onCalendarCancel: () -> Unit,
+    onCalendarSettingsDismiss: () -> Unit,
+    calendarConfigured: Boolean,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showModelDialog by rememberSaveable { mutableStateOf(false) }
-    var showVoiceDialog by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var settingsSection by rememberSaveable { mutableStateOf(com.example.localassistant.settings.SettingsSection.MODELS) }
+    val calendarState by calendar.connectionState.collectAsStateWithLifecycle()
+    val pendingCalendar by calendar.pendingConfirmation.collectAsStateWithLifecycle()
+    val statusNote by calendar.statusNote.collectAsStateWithLifecycle()
+    val showCalendarSettings by calendar.calendarSettingsPrompt.collectAsStateWithLifecycle()
+
+    LaunchedEffect(statusNote) {
+        val note = statusNote ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(note, withDismissAction = true)
+        calendar.clearStatusNote()
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             onImportModel(uri)
-            showModelDialog = false
         }
     }
 
@@ -205,7 +228,10 @@ fun ChatScreen(
             voice.phase is VoicePhase.Recording -> onVoiceStop()
             voice.phase is VoicePhase.Transcribing -> Unit
             voice.phase is VoicePhase.Draft -> Unit
-            voice.whisper !is WhisperModelStatus.Ready -> showVoiceDialog = true
+            voice.whisper !is WhisperModelStatus.Ready -> {
+                settingsSection = com.example.localassistant.settings.SettingsSection.VOICE
+                showSettings = true
+            }
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO,
@@ -243,46 +269,68 @@ fun ChatScreen(
         onVoiceTranscriptConsumed(transcript.id)
     }
 
-    if (showModelDialog) {
-        AppDialog(title = "Модели", onDismiss = { showModelDialog = false }) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ModelPanel(
-                    status = state.model,
-                    compact = false,
-                    onDownload = {
-                        onDownloadModel()
-                        showModelDialog = false
-                    },
-                    onCancelDownload = onCancelDownload,
-                    onImport = { importLauncher.launch(arrayOf("*/*")) },
-                    onDelete = {
-                        onDeleteModel()
-                        showModelDialog = false
-                    },
-                    onRetryLoad = onRetryModelLoad,
-                )
-                WhisperModelPanel(
-                    status = voice.whisper,
-                    onDownload = onWhisperDownload,
-                    onCancelDownload = onWhisperCancelDownload,
-                    onImport = { whisperImportLauncher.launch(arrayOf("*/*")) },
-                    onDelete = onWhisperDelete,
-                    onRetryLoad = onWhisperRetry,
-                )
-            }
-        }
+    if (showSettings) {
+        com.example.localassistant.settings.SettingsDialog(
+            initialSection = settingsSection,
+            modelStatus = state.model,
+            whisperStatus = voice.whisper,
+            calendarState = calendarState,
+            calendarConfigured = calendarConfigured,
+            onDismiss = { showSettings = false },
+            onDownloadModel = onDownloadModel,
+            onCancelDownload = onCancelDownload,
+            onImportModel = { importLauncher.launch(arrayOf("*/*")) },
+            onDeleteModel = onDeleteModel,
+            onRetryModelLoad = onRetryModelLoad,
+            onWhisperDownload = onWhisperDownload,
+            onWhisperCancelDownload = onWhisperCancelDownload,
+            onWhisperImport = { whisperImportLauncher.launch(arrayOf("*/*")) },
+            onWhisperDelete = onWhisperDelete,
+            onWhisperRetry = onWhisperRetry,
+            onCalendarConnect = onCalendarConnect,
+            onCalendarDisconnect = onCalendarDisconnect,
+            onCalendarCheck = onCalendarCheck,
+            onCalendarCancelCheck = onCalendarCancelCheck,
+        )
     }
 
-    if (showVoiceDialog) {
-        AppDialog(title = "Распознавание речи", onDismiss = { showVoiceDialog = false }) {
-            WhisperModelPanel(
-                status = voice.whisper,
-                onDownload = onWhisperDownload,
-                onCancelDownload = onWhisperCancelDownload,
-                onImport = { whisperImportLauncher.launch(arrayOf("*/*")) },
-                onDelete = onWhisperDelete,
-                onRetryLoad = onWhisperRetry,
-            )
+    // Calendar write-confirmation dialog (CREATE / UPDATE / DELETE).
+    val pending = pendingCalendar
+    if (pending != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { onCalendarCancel() },
+            confirmButton = {
+                TextButton(onClick = { onCalendarConfirm() }) { Text("Подтвердить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { onCalendarCancel() }) { Text("Отмена") }
+            },
+            title = { Text("Подтвердите действие") },
+            text = { Text(calendarConfirmationSummary(pending)) },
+        )
+    }
+
+    // "Календарь не подключён" banner.
+    if (showCalendarSettings) {
+        Surface(
+            color = MaterialTheme.colorScheme.tertiaryContainer,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Календарь не подключён",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = {
+                    settingsSection = com.example.localassistant.settings.SettingsSection.CALENDAR
+                    showSettings = true
+                    onCalendarSettingsDismiss()
+                }) { Text("Настройки") }
+            }
         }
     }
 
@@ -305,8 +353,11 @@ fun ChatScreen(
                     IconButton(onClick = onNewChat) {
                         Icon(Icons.Default.Add, contentDescription = "Новый чат")
                     }
-                    IconButton(onClick = { showModelDialog = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Модель")
+                    IconButton(onClick = {
+                        settingsSection = com.example.localassistant.settings.SettingsSection.MODELS
+                        showSettings = true
+                    }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Настройки")
                     }
                 },
             )
@@ -342,9 +393,8 @@ fun ChatScreen(
             HorizontalDivider()
 
             if (state.model !is ModelStatus.Ready) {
-                ModelPanel(
+                com.example.localassistant.settings.ModelPanelInline(
                     status = state.model,
-                    compact = false,
                     onDownload = onDownloadModel,
                     onCancelDownload = onCancelDownload,
                     onImport = { importLauncher.launch(arrayOf("*/*")) },
@@ -377,6 +427,37 @@ fun ChatScreen(
                 onCancelTranscription = onVoiceCancelTranscription,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
+
+            // Calendar not-connected / reconnect banner. Shown only after a calendar tool was
+            // requested — the settings prompt flag gates this, not a guess based on token presence.
+            if (showCalendarSettings && calendarState !is CalendarConnectionState.Connected) {
+                val needsReconnect = calendarState is CalendarConnectionState.NeedsReconnect
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = if (needsReconnect) {
+                                "Требуется повторное подключение к календарю"
+                            } else {
+                                "Календарь не подключён"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = onCalendarConnect) {
+                            Text(if (needsReconnect) "Переподключить" else "Подключить")
+                        }
+                        TextButton(onClick = onCalendarSettingsDismiss) {
+                            Text("Скрыть")
+                        }
+                    }
+                }
+            }
 
             InputBar(
                 value = state.input,
@@ -630,134 +711,7 @@ private fun InputBar(
     }
 }
 
-@Composable
-private fun ModelPanel(
-    status: ModelStatus,
-    compact: Boolean,
-    onDownload: () -> Unit,
-    onCancelDownload: () -> Unit,
-    onImport: () -> Unit,
-    onDelete: () -> Unit,
-    onRetryLoad: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-        ),
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            when (status) {
-                is ModelStatus.Absent -> {
-                    Text("Модель не установлена", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "${ModelSpec.displayName}, ${ModelSpec.displaySize}. " +
-                            "Файл хранится в приватном хранилище приложения.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onDownload) {
-                            Text("Скачать ${ModelSpec.displaySize}")
-                        }
-                        OutlinedButton(onClick = onImport) { Text("Импорт GGUF") }
-                    }
-                }
 
-                is ModelStatus.Downloading -> {
-                    val total = status.totalBytes
-                    val fraction = if (total != null && total > 0) {
-                        (status.downloadedBytes.toFloat() / total).coerceIn(0f, 1f)
-                    } else {
-                        null
-                    }
-                    Text(
-                        if (status.bytesPerSecond > 0) "Скачивание модели" else "Чтение файла",
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    if (fraction != null) {
-                        LinearProgressIndicator(
-                            progress = { fraction },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    } else {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = buildString {
-                            append(formatBytes(status.downloadedBytes))
-                            if (total != null) append(" из ").append(formatBytes(total))
-                            if (status.bytesPerSecond > 0) {
-                                append(" · ").append(formatBytes(status.bytesPerSecond)).append("/с")
-                            }
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = onCancelDownload) { Text("Отмена") }
-                }
-
-                ModelStatus.Verifying -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Проверка и сохранение модели…")
-                    }
-                }
-
-                ModelStatus.Loading -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Загрузка модели в память…")
-                    }
-                }
-
-                is ModelStatus.Ready -> {
-                    Text("Модель готова", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "${status.engineDescription.ifBlank { status.fileName }} · " +
-                            formatBytes(status.sizeBytes) + " · контекст ${status.contextTokens}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (!compact) {
-                        Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = onImport) { Text("Заменить GGUF") }
-                            OutlinedButton(onClick = onDelete) {
-                                Icon(Icons.Default.Delete, contentDescription = null)
-                                Spacer(Modifier.width(4.dp))
-                                Text("Удалить")
-                            }
-                        }
-                    }
-                }
-
-                is ModelStatus.Error -> {
-                    Text("Ошибка модели", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = status.message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onRetryLoad) {
-                            Icon(Icons.Default.Refresh, contentDescription = null)
-                            Spacer(Modifier.width(4.dp))
-                            Text("Повторить")
-                        }
-                        OutlinedButton(onClick = onImport) { Text("Импорт GGUF") }
-                        OutlinedButton(onClick = onDownload) { Text("Скачать") }
-                    }
-                }
-            }
-        }
-    }
-}
 
 private fun modelSubtitle(status: ModelStatus): String = when (status) {
     ModelStatus.Absent -> "модель не установлена"
@@ -768,16 +722,25 @@ private fun modelSubtitle(status: ModelStatus): String = when (status) {
     is ModelStatus.Error -> "ошибка модели"
 }
 
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 Б"
-    val units = arrayOf("Б", "КБ", "МБ", "ГБ")
-    var value = bytes.toDouble()
-    var unit = 0
-    while (value >= 1024 && unit < units.lastIndex) {
-        value /= 1024
-        unit++
+
+
+private fun calendarConfirmationSummary(req: CalendarToolRequest): String {
+    val op = req.op.name.lowercase(Locale.ROOT)
+    val title = when (req.op) {
+        com.example.localassistant.calendar.CalendarOp.CREATE -> "Создать событие"
+        com.example.localassistant.calendar.CalendarOp.UPDATE -> "Изменить событие"
+        com.example.localassistant.calendar.CalendarOp.DELETE -> "Удалить событие"
+        else -> "Действие с календарём"
     }
-    return String.format(Locale.US, if (unit == 0) "%.0f %s" else "%.1f %s", value, units[unit])
+    return buildString {
+        append(title)
+        req.title?.let { append("\n").append(it) }
+        if (req.date != null || req.time != null) {
+            append("\n")
+            req.date?.let { append(it) }
+            req.time?.let { append(" в ").append(it) }
+        }
+    }
 }
 
 private fun pluralTurns(count: Int): String {
@@ -790,34 +753,4 @@ private fun pluralTurns(count: Int): String {
     }
 }
 
-@Composable
-private fun AppDialog(
-    title: String,
-    onDismiss: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(28.dp),
-            tonalElevation = 6.dp,
-        ) {
-            Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
-            ) {
-                Text(title, style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(12.dp))
-                content()
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    TextButton(onClick = onDismiss) { Text("Закрыть") }
-                }
-            }
-        }
-    }
-}
+
