@@ -121,9 +121,8 @@ class CalendarAuthManager(
     fun knownAccountEmail(): String? = tokenStore.email()
 
     /**
-     * Builds an [AuthorizationRequest] for the Calendar scopes the implementation needs. Only
-     * `calendar.events` is requested: the app writes exclusively to the `primary` calendar and does
-     * not enumerate calendar lists.
+     * Builds an authorization request for Calendar Events and Google Tasks. The additional Tasks
+     * grant requires explicit user consent; Calendar calendar-list access is not requested.
      *
      * The request is bound to [accountEmail] when known. The Authorization API does not reveal
      * which account it selected, so the account must be chosen explicitly to make
@@ -131,7 +130,7 @@ class CalendarAuthManager(
      */
     fun buildAuthorizationRequest(accountEmail: String? = tokenStore.email()): AuthorizationRequest {
         val builder = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(CalendarScopes.CALENDAR_EVENTS))
+            .setRequestedScopes(CalendarScopes.REQUIRED)
         accountEmail?.takeIf { it.isNotBlank() }?.let {
             builder.setAccount(Account(it, GOOGLE_ACCOUNT_TYPE))
         }
@@ -236,7 +235,7 @@ class CalendarAuthManager(
                     if (token.isNullOrBlank() || !scopeGranted(result)) {
                         dropCachedToken()
                         _state.value = CalendarConnectionState.NeedsReconnect(
-                            "Доступ к календарю не подтверждён. Подключите его заново."
+                            "Доступ к Calendar и Google Tasks не подтверждён. Подключите аккаунт заново."
                         )
                         return
                     }
@@ -342,10 +341,10 @@ class CalendarAuthManager(
                 val token = result.accessToken
                 if (token.isNullOrBlank() || !scopeGranted(result)) {
                     _state.value = CalendarConnectionState.NeedsReconnect(
-                        "Доступ к календарю не подтверждён. Подключите его заново."
+                        "Доступ к Calendar и Google Tasks не подтверждён. Подключите аккаунт заново."
                     )
                     return TokenResult.RequiresReconnect(
-                        "Доступ к календарю не подтверждён. Подключите его заново."
+                        "Доступ к Calendar и Google Tasks не подтверждён. Подключите аккаунт заново."
                     )
                 }
                 persistToken(token, extractEmail(result))
@@ -435,7 +434,7 @@ class CalendarAuthManager(
                 client.revokeAccess(
                     RevokeAccessRequest.builder()
                         .setAccount(Account(email, GOOGLE_ACCOUNT_TYPE))
-                        .setScopes(listOf(CalendarScopes.CALENDAR_EVENTS))
+                        .setScopes(CalendarScopes.REQUIRED)
                         .build()
                 ).awaitResult().isSuccess
             } catch (t: Throwable) {
@@ -493,9 +492,9 @@ class CalendarAuthManager(
         }
         if (!scopeGranted(result)) {
             _state.value = CalendarConnectionState.NeedsReconnect(
-                "Необходимый доступ к календарю не выдан."
+                "Необходимый доступ к Calendar и Google Tasks не выдан."
             )
-            return AuthResult.Failed("Необходимый доступ к календарю не выдан. Повторите попытку.")
+            return AuthResult.Failed("Разрешите доступ к Calendar и Google Tasks при повторном подключении аккаунта.")
         }
         persistToken(accessToken, extractEmail(result) ?: accountEmail)
         _state.value = CalendarConnectionState.Connected(tokenStore.email())
@@ -509,7 +508,7 @@ class CalendarAuthManager(
      */
     private fun scopeGranted(result: AuthorizationResult): Boolean {
         val granted = result.grantedScopes ?: return true
-        return CalendarScopes.CALENDAR_EVENTS.scopeUri in granted
+        return CalendarScopes.REQUIRED.all { it.scopeUri in granted }
     }
 
     private fun persistToken(accessToken: String, email: String?) {

@@ -156,7 +156,7 @@ JNI-символов, 0 символов ggml/whisper, `NEEDED` только lib
 Проверка: `AuthorizedCalendarGatewayTest`; сборка/тесты/lint; сценарий на CPH2581.
 
 ## D016 — Calendar read periods и группировка ответа
-Статус: принято пользователем и реализовано (2026-10-27), runtime-проверка ожидается.
+Статус: принято пользователем и проверено вручную (2026-10-27); pagination расширена D018.
 Контекст: недельный ответ повторялся для вопроса об отдельном дне; список был плоским.
 Решение: READ/SEARCH используют date как первый день, days как число календарных дней;
 при date без days — один день, иначе defaults READ=7/SEARCH=30 с сегодняшнего дня.
@@ -164,11 +164,11 @@ JNI-символов, 0 символов ggml/whisper, `NEEDED` только lib
 Группировка/сортировка выполняется приложением, all-day date не трактуется как Instant.
 Жирные date headings рисуются Compose AnnotatedString без Markdown-зависимости.
 Planner выделяет текущий запрос отдельно от reference history, SEARCH сохраняет дату/условие.
-Последствия: одна страница API до 25 событий; pagination и multi-step/batch — отдельный scope.
-Проверка: assembleDebug успешен; ручная приёмка заблокирована отключённым OnePlus.
+Исходное ограничение: одна страница API до 25 событий; pagination/batch впоследствии расширены D018.
+Проверка: assembleDebug успешен; пользователь принял группы дат и day-specific поиск на CPH2581.
 
 ## D017 — App-side target resolver для одиночных UPDATE/DELETE
-Статус: выбран пользователем, реализован (2026-10-27); runtime-проверка ожидается.
+Статус: выбран пользователем и проверен на устройстве (2026-10-27); контекст объединён D018.
 Контекст: модель не получала реальные event IDs и теряла write intent после SEARCH.
 Решение: UPDATE/DELETE содержат поисковые параметры source_date/source_time/query,
 приложение хранит последний API result, разрешает target, предлагает выбор при нескольких
@@ -177,7 +177,107 @@ Planner выделяет текущий запрос отдельно от refer
 и длительность; PATCH сохраняет незаданные поля. После подтверждения — refetch/compare.
 Отмена/смена подключения очищают pending interaction; контекст не пишется в docs/logs.
 Альтернативы: prompt-only (недостаточно); общий bounded LLM/tool loop (отдельный scope).
-Проверка: assembleDebug успешно; на устройстве ещё не проверено, автотесты не запускались.
+Проверка: assembleDebug успешно; пользователь принял перенос/удаление, trace PATCH200/DELETE204.
+Автотесты этого блока не запускались.
+
+## D018 — Единый Calendar session и общий single/batch pipeline
+Статус: архитектура одобрена (2026-10-27); runtime-приёмка реализации НЕ пройдена.
+Контекст: предыдущие исправления работали по отдельности, но терялись pending intent/slots
+и найденный набор, multiple writes не исполнялись. Требование — расширить одну систему.
+Решение: CalendarSession принадлежит executor и единолично хранит draft/targets/selector/
+uncertain marker; planner получает typed snapshot, а не воспроизведение user-команд.
+new/continue/all — метаданные существующих пяти операций, не дополнительные CalendarOp.
+Одиночные и batch UPDATE/DELETE используют один resolve/prepare/confirm/preflight/apply.
+CREATE partial slots сохраняются, relative dates фиксируются, topic/Stop/new-chat/account
+сбрасывают состояние. Убраны старые sync/runWrite/unused modelContext/result paths.
+Пагинация до 500, batch до 100; превышение не выдаётся за полный набор; actual calendar weeks.
+Partial outcomes явные, no-op без PATCH, неизвестная запись не повторяется автоматически.
+Альтернативы: дополнительные prompt patches/отдельные параллельные caches отклонены;
+общий свободный LLM/tool loop не нужен для этих детерминированных действий.
+Последствия: in-memory session без process-death recovery, batch не транзакция;
+классификация продолжения всё ещё зависит от локальной модели.
+Проверка: assembleDebug и diff check успешны; unit/UI tests не запускались по запрету;
+Device validation выявила неверные DELETE/new на поисковые реплики, потерю CREATE title
+и сброс draft на slot-ответе. Выбор op/context всё ещё слишком доверен модели;
+предложена app-owned turn/slot policy, её реализация ожидает согласования.
+Схема текущего кода: CALENDAR_FLOW.md; её наличие не означает приёмку сценариев.
+
+## D019 — App-owned намерение и версионированный field-patch
+Статус: одобрено пользователем и реализовано (2026-10-27); ручная приёмка ещё впереди.
+Контекст: D018 не прошёл приёмку: модель путала поиск/DELETE, new/continue, title и slot reply.
+Решение: CalendarSession единственный state owner (taskId/version/phase, object/op, awaiting,
+targets, draft и object без op). Stateless CalendarTurnPolicy определяет допустимую op/
+переход из реплики и snapshot; новая задача не наследует старый write intent.
+Модель сначала получает явный snapshot с null/[], затем предлагает только set/clear с
+task_id/version. Tool/context/all/ID из модели больше не являются источником действий.
+App извлекает типовые русские поля и проверяет grounding предложений; неверный patch
+не отменяет достоверные app поля и не меняет операцию. Неизвестное уточняется, не выдумывается.
+Связанный объект без операции сохраняется до выбора действия; stale версии не применяются.
+Пагинация/подтверждение/PATCH/no-op/formatting остаются общей цепочкой. Поиск — bounded
+полный период и local AND tokens с ё/е и простыми окончаниями вместо потери словоформ в q.
+Границы: bounded Russian grammar, не универсальная NLP/морфология; in-memory process state.
+Проверка: assembleDebug/diff check успешно; unit/UI tests не запускались по запрету;
+device install/capture текущей policy не выполнялись. Старый D018 runtime не считать успешным.
+
+## D020 — Общий temporal parser и явные calendar/rolling bounds
+Статус: запрошено пользователем и реализовано (2026-10-27); ручная приёмка впереди.
+Контекст: «на этой неделе» не распознавалось из-за отсутствующего окончания «е»;
+пользователь дополнительно запросил относительные дни и прошлые/будущие недели/месяцы.
+Решение: одна грамматика CalendarTemporalExpression для полного span периода и follow-up;
+CalendarTime один вычисляет границы. Relative days ±2, calendar current/previous/next,
+rolling LAST/UPCOMING, quantities и ago/through как point-date.
+Calendar weeks пн–вс, month lengths настоящие, end exclusive. Rolling LAST — назад от
+следующей полуночи с включением сегодня, UPCOMING — с сегодняшней полуночи.
+Фразы полностью исключаются из query. Неясная quantity уточняется в той же задаче,
+reference anchor сохраняет исходную дату при задержке ответа. Limit90 дней остаётся явным.
+Добавлены focused regression source tests без запуска по запрету пользователя.
+Зависимости, auth, permissions, native и согласованные правила подтверждений не менялись.
+
+## D021 — Rename roles, weekday/date intent и явная граница Google Tasks
+Статус: Event-исправления реализованы по запросу (2026-10-27), runtime-приёмка впереди;
+подключение настоящего Google Tasks API ожидает отдельного согласия.
+Контекст: greedy rename терял target query и включал source/date в новое title; weekday
+отсутствовал, absolute date не участвовала в раннем intent; склонения имён не совпадали.
+Решение: отдельный stateless rename parser перед общим command/date parsing; literal new
+title, source query/date, title-only matching и explicit ambiguous clarification.
+Shared temporal parser включает weekday/absolute dates, текущая неделя по умолчанию,
+previous/next week; contradictory date требует уточнения. Case endings расширены без fuzzy.
+Tasks не существуют в Events API: запросы Tasks теперь guard-ятся вместо false mixed list.
+OAuth/new API не добавлены. Для будущей интеграции нужен отдельный source adapter в той же
+Session, typed target refs и новый scope. Tasks.due — date only, scheduled time не доступен.
+Проверка: assembleDebug/diff check успешны; focused source tests добавлены, не запускались
+по запрету; capture содержал только один успешный CURRENT_WEEK read, остальное не доказано.
+
+## D022 — Публичный Google Tasks API в общей Event/Task-цепочке
+Статус: пользователь выбрал вариант 1, одобрил Tasks API/scope и сообщил о ручной настройке;
+реализовано 2026-10-28, runtime OAuth/API-приёмка ещё впереди.
+Решение: tasks scope вместе с calendar.events, одна авторизация аккаунта/проверка grants,
+общие HTTP transport и read-only retry policy. Отдельный native Tasks adapter, тот же executor/
+Session/confirmation, kind и list-qualified refs не допускают смешения IDs/операций.
+Модель не выбирает API и не создаёт refs. Task fields title/notes/optional due/status,
+list catalog/choice в Session. due date-only без timezone shift, нет fake all-day/time/Event.
+Task create не требует часов; unsupported clock сохраняет draft для «без времени».
+Read all-dates включает undated, status/date/list filters задаются явно; writes подтверждаются.
+Ограничения: catalog100/result500/batch100/range90, без silent truncation; batch не atomic.
+List CRUD/move, subtask creation, recurrence/time не добавлены. Parent deletion не делает
+скрытый cascade, assigned deletion отражает эффект на исходную задачу в confirmation.
+Альтернативы Task+local time или companion Event не выбраны; старые Events не мигрируются.
+Проверка: assembleDebug/diff check успешно; source tests добавлены, unit/UI/test compilation
+не запускались по прежнему запрету. Девайс не инспектировался, новая сборка не установлена.
+Ручные шаги Google Console/consent и проверка — GOOGLE_TASKS.md.
+
+## D023 — Новый запрос по умолчанию Event, source binding только для продолжений
+Статус: явно задано пользователем, реализовано и принято им на OnePlus 2026-10-28.
+Контекст: Task lifecycle/search принят, но новое named question наследовало TASK.
+Capture пуст; buffer dump отменён из-за отсутствия девайса. Причина подтверждается
+source fallback в коде и Task header из сообщения пользователя, не придуманными HTTP-логами.
+Решение: new standalone subject без Task marker = EVENT, явная «задача» = TASK.
+Source inheritance ограничено refs/slots/field edits/temporal reply; possessive внутри
+нового имени не reference. Новые Event queries не наследуют Task list/status filters.
+Empty read может продолжать query; write требует реальные refs. TITLE data не меняет kind.
+Проверка: assembleDebug/diff check успешны; CalendarSourceSelectionTest authored not run.
+Сборка установлена install -r, последний ручной набор принят пользователем; это не полный
+автоматический regression PASS. Scopes этой правкой не менялись, data не мигрировались.
 
 ## Формат нового решения
 ID и дата; статус (предложено/принято/заменено); контекст; решение; альтернативы; последствия; способ проверки.

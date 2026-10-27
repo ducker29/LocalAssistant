@@ -10,13 +10,17 @@ import com.example.localassistant.llm.GenerationTermination
 import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
 import com.example.localassistant.llm.PromptMessage
-import com.example.localassistant.calendar.CalendarToolRequest
+import com.example.localassistant.calendar.CalendarTurnCommand
+import com.example.localassistant.calendar.CalendarTurnPlan
+import com.example.localassistant.calendar.CalendarTurnTransition
 import com.example.localassistant.calendar.CalendarAssistantDebug
 import com.example.localassistant.calendar.CalendarToolResult
 import com.example.localassistant.calendar.CalendarViewModel
 import com.example.localassistant.llm.ReasoningFilter
 import com.example.localassistant.model.ModelStatus
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,8 +36,6 @@ data class ChatUiState(
     val error: String? = null,
     /** Assistant message currently being continued, if any. */
     val continuationMessageId: Long? = null,
-    /** A calendar write awaiting user confirmation, if any. */
-    val pendingCalendarRequest: CalendarToolRequest? = null,
 ) {
     val canSend: Boolean
         get() = input.isNotBlank() && model is ModelStatus.Ready && !isGenerating
@@ -118,7 +120,6 @@ class ChatViewModel(
                 droppedTurns = 0,
                 error = null,
                 continuationMessageId = null,
-                pendingCalendarRequest = null,
             )
         }
         persist()
@@ -132,54 +133,36 @@ class ChatViewModel(
             val calId = java.util.UUID.randomUUID().toString().take(8)
             CalendarAssistantDebug.log(calId, "planner entered: calendarAttached=${calendar != null}")
             val plannerOutcome = runPlanner(text, calId)
+            if (plannerOutcome is PlannerOutcome.Cancelled) {
+                finishMessage(assistantId, MessageStatus.INTERRUPTED, "Остановлено")
+                _state.update { it.copy(isGenerating = false) }
+                persist()
+                return@launch
+            }
+            if (plannerOutcome is PlannerOutcome.Failed) {
+                finishMessage(assistantId, MessageStatus.COMPLETE, plannerOutcome.message)
+                _state.update { it.copy(isGenerating = false) }
+                persist()
+                return@launch
+            }
             if (plannerOutcome is PlannerOutcome.ToolCall) {
-                val req = plannerOutcome.request
-                CalendarAssistantDebug.log(calId, "dispatch: ${CalendarAssistantDebug.parameters(req)}")
-                val result = runCalendarTool(req, calId)
+                val command = plannerOutcome.command
+                CalendarAssistantDebug.log(calId, "dispatch: object_kind=${command.plan.objectKind}, app_operation=${command.plan.operation}, transition=${command.plan.transition}, fields=${command.patch.values.keys.map { it.wire }}")
+                val result = runCalendarTool(command, calId)
                 CalendarAssistantDebug.log(calId, "final tool_result=${result::class.simpleName}, returned_to_model=false, destination=UI")
-                when (result) {
-                    is CalendarToolResult.NeedConfirmation -> {
-                        // Wait for the user to confirm/cancel; the gate lives in the executor.
-                        finishMessage(assistantId, MessageStatus.COMPLETE,
-                            "Подтвердите действие в диалоге ниже.")
-                        _state.update { st -> st.copy(isGenerating = false) }
-                        persist()
-                        return@launch
-                    }
-                    is CalendarToolResult.NotConnected -> {
-                        finishMessage(assistantId, MessageStatus.COMPLETE,
-                            result.message)
-                        _state.update { st -> st.copy(isGenerating = false) }
-                        persist()
-                        return@launch
-                    }
-                    is CalendarToolResult.Ambiguous -> {
-                        val list = result.candidates.joinToString("\n") { "• " + it.summary(
-                            java.time.ZonedDateTime.now()) }
-                        finishMessage(assistantId, MessageStatus.COMPLETE,
-                            "Несколько подходящих событий:\n$list\n\nУточни, какое именно.")
-                        _state.update { st -> st.copy(isGenerating = false) }
-                        persist()
-                        return@launch
-                    }
-                    is CalendarToolResult.Ok -> {
-                        finishMessage(assistantId, MessageStatus.COMPLETE, result.statusText)
-                        _state.update { st -> st.copy(isGenerating = false) }
-                        persist()
-                        return@launch
-                    }
-                    is CalendarToolResult.Error -> {
-                        finishMessage(assistantId, MessageStatus.COMPLETE, result.message)
-                        _state.update { st -> st.copy(isGenerating = false) }
-                        persist()
-                        return@launch
-                    }
+                val response = when (result) {
+                    is CalendarToolResult.Ok -> result.statusText
+                    is CalendarToolResult.Clarification -> result.message
+                    is CalendarToolResult.Error -> result.message
+                    is CalendarToolResult.NotConnected -> result.message
                 }
+                finishMessage(assistantId, if (cancelRequested) MessageStatus.INTERRUPTED else MessageStatus.COMPLETE, response)
+                _state.update { it.copy(isGenerating = false) }
+                persist()
+                return@launch
             }
             // No tool call (or NONE): fall through to the normal streaming answer below.
             CalendarAssistantDebug.log(calId, "tool_result=None, returned_to_model=false, destination=normal_chat")
-
-            // Fit history into the window, reserving room for at least a minimal answer.
 
             // Fit history into the window, reserving room for at least a minimal answer.
             // The output is capped at CAP_TOKENS, so reserving that here guarantees the
@@ -432,8 +415,7 @@ class ChatViewModel(
     fun stopGeneration() {
         if (!_state.value.isGenerating) return
         cancelRequested = true
-        calendar?.cancelPending()
-        calendar?.selectTarget(null)
+        calendar?.clearToolContext()
         engine.cancelGeneration()
     }
 
@@ -498,8 +480,10 @@ class ChatViewModel(
 
     /** Result of the planner pass. */
     sealed interface PlannerOutcome {
+        data object Cancelled : PlannerOutcome
+        data class Failed(val message: String) : PlannerOutcome
         data object None : PlannerOutcome
-        data class ToolCall(val request: CalendarToolRequest) : PlannerOutcome
+        data class ToolCall(val command: CalendarTurnCommand) : PlannerOutcome
     }
 
     /**
@@ -513,25 +497,52 @@ class ChatViewModel(
             return PlannerOutcome.None
         }
         val connectionState = cal.connectionState.value
+        val contextVersion = cal.contextVersion()
+        val turn = cal.prepareTurn(userText)
+        CalendarAssistantDebug.log(calId, "turn: object_kind=${turn.objectKind}, app_operation=${turn.operation}, transition=${turn.transition}, task_id=${turn.taskId}, version=${turn.version}")
+        when (turn.transition) {
+            CalendarTurnTransition.GENERAL -> {
+                cal.clearToolContext()
+                return PlannerOutcome.None
+            }
+            CalendarTurnTransition.CANCEL -> {
+                cal.clearToolContext()
+                return PlannerOutcome.Failed("Текущая Calendar-задача отменена.")
+            }
+            CalendarTurnTransition.CLARIFY -> {
+                if (turn.resetOnClarify) cal.clearToolContext()
+                return PlannerOutcome.Failed(turn.message ?: "Уточните действие с календарём.")
+            }
+            CalendarTurnTransition.NEW_OBJECT -> return PlannerOutcome.Failed(cal.stageSubject(turn))
+            else -> Unit
+        }
         CalendarAssistantDebug.log(calId, "planner state=${connectionState::class.simpleName}, connection_state_in_prompt=true")
         val raw = try {
-            runPlannerGeneration(userText, calId, connectionState)
-        } catch (t: Throwable) {
-            CalendarAssistantDebug.log(calId, "planner failure category=${t::class.simpleName}")
-            return PlannerOutcome.None
+            runPlannerGeneration(userText, calId, connectionState, turn)
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            currentCoroutineContext().ensureActive()
+            return PlannerOutcome.Cancelled
+        } catch (t: Exception) {
+            CalendarAssistantDebug.log(calId, "planner failure category=${t::class.simpleName}, fallback=grounded_app_fields")
+            null
         }
-        CalendarAssistantDebug.log(calId, "planner raw length=${raw.length}, redacted=${CalendarAssistantDebug.redactedRaw(raw)}")
-        val parsed = com.example.localassistant.calendar.CalendarToolParser.parse(raw)
-        return when (parsed) {
+        if (cancelRequested) return PlannerOutcome.Cancelled
+        if (raw != null) CalendarAssistantDebug.log(calId, "planner raw length=${raw.length}, redacted=${CalendarAssistantDebug.redactedRaw(raw)}")
+        if (contextVersion != cal.contextVersion()) {
+            return PlannerOutcome.Failed("Calendar-контекст или подключение изменились. Повторите запрос.")
+        }
+        val proposal = when (val parsed = raw?.let { com.example.localassistant.calendar.CalendarToolParser.parse(it) }) {
             is com.example.localassistant.calendar.CalendarToolParser.ParseOutcome.Ok -> {
-                CalendarAssistantDebug.log(calId, "parser OK: ${CalendarAssistantDebug.parameters(parsed.request)}")
-                PlannerOutcome.ToolCall(parsed.request)
+                CalendarAssistantDebug.log(calId, "parser OK: field_patch=true, version_matches=${parsed.proposal.taskId == turn.taskId && parsed.proposal.version == turn.version}")
+                parsed.proposal
             }
             is com.example.localassistant.calendar.CalendarToolParser.ParseOutcome.ToolParseError -> {
                 CalendarAssistantDebug.log(calId, "parser REJECTED: reason=${CalendarAssistantDebug.rejection(parsed.reason)}")
-                PlannerOutcome.None
+                null
             }
+            null -> null
         }
+        return PlannerOutcome.ToolCall(cal.commandFor(turn, proposal))
     }
 
     /** Single non-streaming generation; collects the full text. */
@@ -539,51 +550,47 @@ class ChatViewModel(
         userText: String,
         calId: String,
         connectionState: com.example.localassistant.calendar.CalendarConnectionState,
+        turn: CalendarTurnPlan,
     ): String {
         val system = com.example.localassistant.calendar.CalendarToolSpec.plannerSystemPrompt(
             connectionState,
             java.time.ZonedDateTime.now(),
         )
-        val history = _state.value.messages.dropLast(2)
-        // Free-form assistant refusals are not capability facts for the tool router.
-        // Preserve recent user references/explicit IDs; ordinary chat history is unchanged.
-        val recent = history.filter { it.role == Role.USER }.takeLast(3)
-        // Consecutive user turns made the small model repeat an older request. Keep the
-        // current task unambiguous in one user turn; history is explicitly reference data.
-        val plannerInput = buildString {
-            if (recent.isNotEmpty()) {
-                append("ИСТОРИЯ (не выполнять, только для ссылок):\n")
-                recent.forEachIndexed { index, message ->
-                    append(index + 1).append(") ").append(message.text).append('\n')
-                }
-            }
-            append("ТЕКУЩИЙ ЗАПРОС (выбери инструмент только для него):\n").append(userText)
-        }
+        val plannerInput = "SESSION (данные приложения):\n${turn.snapshot}\n" +
+            "APP_OBJECT_KIND=${turn.objectKind}; APP_OPERATION=${turn.operation}; APP_TRANSITION=${turn.transition}; " +
+            "KNOWN_FIELDS=${turn.seed.values.keys.map { it.wire }}\n" +
+            "ТЕКУЩАЯ РЕПЛИКА:\n$userText"
         val messages = listOf(
             PromptMessage("system", system),
             PromptMessage("user", plannerInput),
         )
-        CalendarAssistantDebug.log(calId, "planner input=state_and_date_system+labeled_history_and_current_request, connection_state_in_prompt=true")
+        CalendarAssistantDebug.log(calId, "planner input=state_and_date_system+typed_session+current_request, connection_state_in_prompt=true")
+        val nativeContext = (_state.value.model as? ModelStatus.Ready)?.contextTokens ?: 2048
+        val promptTokens = engine.countPromptTokens(messages)
+        require(promptTokens >= 0 && promptTokens + 256 + 8 <= nativeContext) { "Planner context limit" }
         val sb = StringBuilder()
-        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val done = kotlinx.coroutines.CompletableDeferred<GenerationTermination>()
         val params = GenerationParams(maxTokens = 256, temperature = 0.0f)
+        if (cancelRequested) throw kotlinx.coroutines.CancellationException("Planner cancelled")
         engine.generate(
             messages = messages,
             params = params,
             onChunk = { chunk -> sb.append(chunk) },
             onDone = { result ->
                 CalendarAssistantDebug.log(calId, "planner generation termination=${result.termination}")
-                done.complete(Unit)
+                done.complete(result.termination)
             },
         )
-        try { done.join() } catch (t: Throwable) { throw t }
+        val termination = done.await()
+        if (termination == GenerationTermination.CANCELLED) throw kotlinx.coroutines.CancellationException("Planner cancelled")
+        check(termination == GenerationTermination.EOG) { "Planner did not finish" }
         return sb.toString()
     }
 
-    private suspend fun runCalendarTool(request: CalendarToolRequest, calId: String): CalendarToolResult {
+    private suspend fun runCalendarTool(command: CalendarTurnCommand, calId: String): CalendarToolResult {
         val cal = calendar ?: return CalendarToolResult.Error("Календарь не настроен")
         return kotlinx.coroutines.withContext(CalendarAssistantDebug.Trace(calId)) {
-            cal.run(request)
+            cal.run(command)
         }
     }
 

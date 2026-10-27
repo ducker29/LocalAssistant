@@ -15,6 +15,7 @@ class AuthorizedCalendarGateway(
     private val delegate: CalendarGateway,
     private val auth: CalendarAuthorization,
 ) : CalendarGateway {
+    private val authorization = GoogleApiAuthorization(auth)
 
     override suspend fun listEvents(
         timeMin: ZonedDateTime?,
@@ -48,6 +49,14 @@ class AuthorizedCalendarGateway(
     override suspend fun primaryCalendarName(): String = delegate.primaryCalendarName()
 
     private suspend fun <T> authorized(
+        idempotent: Boolean,
+        call: suspend () -> Result<T>,
+    ): Result<T> = authorization.run(idempotent, call)
+}
+
+/** One retry policy for Event and Task adapters; no write is replayed automatically. */
+internal class GoogleApiAuthorization(private val auth: CalendarAuthorization) {
+    suspend fun <T> run(
         idempotent: Boolean,
         call: suspend () -> Result<T>,
     ): Result<T> {

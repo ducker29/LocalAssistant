@@ -9,7 +9,14 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
-/** A single event as returned by the Calendar API (only the fields we surface). */
+enum class CalendarObjectKind { EVENT, TASK }
+enum class GoogleTaskStatus(val wire: String) {
+    NEEDS_ACTION("needsAction"), COMPLETED("completed");
+    val symbol: String get() = if (this == COMPLETED) "☑" else "☐"
+    companion object { fun fromWire(value: String) = entries.firstOrNull { it.wire == value } }
+}
+
+/** Shared display projection; kind and list-qualified task key preserve the real source. */
 data class CalendarEvent(
     val id: String,
     val title: String,
@@ -18,18 +25,29 @@ data class CalendarEvent(
     val allDay: Boolean,
     val location: String?,
     val description: String?,
+    val kind: CalendarObjectKind = CalendarObjectKind.EVENT,
+    val taskListId: String? = null,
+    val taskListTitle: String? = null,
+    val taskStatus: GoogleTaskStatus? = null,
+    val parentId: String? = null,
+    val assigned: Boolean = false,
 ) {
     /** Stable human line, e.g. "Созвон (2026-10-27 10:00)". Never contains tokens. */
     fun summary(now: ZonedDateTime): String {
         val whenText = startInZone(now.zone)?.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
             ?.let { "$it, ${timeLabel(now.zone)}" } ?: "без даты"
         val name = title.ifBlank { "(без названия)" }
-        return "$name — $whenText"
+        return if (kind == CalendarObjectKind.TASK) {
+            "${taskStatus?.symbol ?: "?"} $name — " +
+                (start ?: "без даты") + (taskListTitle?.let { " (список: $it)" } ?: "")
+        } else "$name — $whenText"
     }
 
     fun startInZone(zone: ZoneId): ZonedDateTime? = parseMoment(start, zone)
+    fun endInZone(zone: ZoneId): ZonedDateTime? = parseMoment(end, zone)
 
     fun timeLabel(zone: ZoneId): String {
+        if (kind == CalendarObjectKind.TASK) return "Время недоступно через Tasks API"
         if (allDay) return "Весь день"
         val from = startInZone(zone) ?: return "Время не указано"
         val timeFormat = DateTimeFormatter.ofPattern("HH:mm")
@@ -42,7 +60,7 @@ data class CalendarEvent(
     private fun parseMoment(value: String?, zone: ZoneId): ZonedDateTime? {
         if (value.isNullOrBlank()) return null
         return try {
-            if (allDay) LocalDate.parse(value).atStartOfDay(zone)
+            if (allDay || kind == CalendarObjectKind.TASK) LocalDate.parse(value).atStartOfDay(zone)
             else Instant.parse(value).atZone(zone)
         } catch (_: DateTimeParseException) {
             null

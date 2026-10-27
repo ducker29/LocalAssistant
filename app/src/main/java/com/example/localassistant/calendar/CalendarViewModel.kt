@@ -36,9 +36,16 @@ class CalendarViewModel(
     val pendingConfirmation: StateFlow<CalendarToolRequest?> = executor.pendingConfirmation
     val confirmationSummary: StateFlow<String?> = executor.confirmationSummary
     val targetSelection: StateFlow<CalendarTargetSelection?> = executor.targetSelection
+    val taskListSelection: StateFlow<CalendarTaskListSelection?> = executor.taskListSelection
+    fun selectTaskList(id: String?) = executor.selectTaskList(id)
 
     fun selectTarget(id: String?) = executor.selectTarget(id)
     fun clearToolContext() = executor.clearContext()
+    fun plannerContext(): String = executor.plannerContext()
+    fun contextVersion(): Long = executor.contextVersion()
+    fun prepareTurn(text: String): CalendarTurnPlan = executor.prepareTurn(text)
+    fun commandFor(plan: CalendarTurnPlan, proposal: CalendarModelPatch?): CalendarTurnCommand = executor.commandFor(plan, proposal)
+    fun stageSubject(plan: CalendarTurnPlan): String = executor.stageSubject(plan)
 
     private val _statusNote = MutableStateFlow<String?>(null)
     val statusNote: StateFlow<String?> = _statusNote.asStateFlow()
@@ -169,13 +176,13 @@ class CalendarViewModel(
      * Acquires a token through the shared path, then executes the request. A missing/invalid
      * authorization never turns into an invented calendar answer.
      */
-    suspend fun run(request: CalendarToolRequest): CalendarToolResult {
+    suspend fun run(command: CalendarTurnCommand): CalendarToolResult {
         val token = authManager.ensureToken()
         CalendarAssistantDebug.log("facade authorization=${token::class.simpleName}, state=${connectionState.value::class.simpleName}")
         return when (token) {
             is TokenResult.Ok -> {
                 _calendarSettingsPrompt.value = false
-                executor.executeSuspend(request)
+                executor.executeSuspend(command)
             }
 
             is TokenResult.RequiresReconnect -> {

@@ -9,9 +9,7 @@ import java.time.temporal.ChronoUnit
 
 /** Builds a partial update from an API event, never from invented model defaults. */
 internal object CalendarEventUpdate {
-    data class Prepared(val payload: UpdateEventPayload, val after: CalendarEvent)
-
-    fun prepare(event: CalendarEvent, request: CalendarToolRequest, now: ZonedDateTime): Prepared {
+    fun prepare(event: CalendarEvent, request: CalendarToolRequest, now: ZonedDateTime): PreparedCalendarUpdate {
         val allDay = if (request.allDaySpecified || request.allDay) request.allDay else event.allDay
         require(allDay == event.allDay) {
             "Смена типа «весь день / со временем» требует отдельного уточнения."
@@ -63,8 +61,17 @@ internal object CalendarEventUpdate {
             location = request.location ?: event.location,
             description = request.description ?: event.description,
         )
-        require(after != event) { "Не указаны изменения: событие уже имеет такие параметры." }
-        return Prepared(
+        fun sameMoment(a: String?, b: String?): Boolean {
+            if (a == b) return true
+            if (a == null || b == null) return false
+            return try {
+                if (allDay) LocalDate.parse(a) == LocalDate.parse(b) else Instant.parse(a) == Instant.parse(b)
+            } catch (_: java.time.DateTimeException) { false }
+        }
+        val changed = after.title != event.title || after.location != event.location ||
+            after.description != event.description || !sameMoment(after.start, event.start) ||
+            !sameMoment(after.end, event.end)
+        return PreparedCalendarUpdate(
             UpdateEventPayload(
                 title = request.title,
                 start = start,
@@ -74,6 +81,7 @@ internal object CalendarEventUpdate {
                 location = request.location,
             ),
             after,
+            changed,
         )
     }
 

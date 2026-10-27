@@ -12,6 +12,8 @@ import com.example.localassistant.calendar.CalendarGateway
 import com.example.localassistant.calendar.CalendarToolExecutor
 import com.example.localassistant.calendar.CalendarTokenStore
 import com.example.localassistant.calendar.HttpCalendarGateway
+import com.example.localassistant.calendar.AuthorizedTasksGateway
+import com.example.localassistant.calendar.HttpGoogleTasksGateway
 import com.example.localassistant.chat.ConversationStore
 import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
@@ -48,6 +50,7 @@ class AppContainer(context: Context) {
     val calendarExecutor = CalendarToolExecutor(
         gateway = calendarGateway,
         is_connected = { calendarAuthManager.currentToken() != null },
+        tasksGateway = AuthorizedTasksGateway(HttpGoogleTasksGateway(tokenProvider = { calendarAuthManager.currentToken() }), calendarAuthManager),
     )
 }
 

@@ -1,410 +1,68 @@
 # Текущее состояние проекта
 
-## Runtime: single UPDATE/DELETE приняты; нужен multi-turn session/batch scope (2026-10-27)
+## Контрольная точка — 2026-10-28
 
-- Пользователь подтвердил работу одиночного resolver. Trace: UPDATE search/GET/confirm/
-  refetch/PATCH200/Ok; DELETE search/GET/confirm/refetch/DELETE204/Ok. Первоначальный 401
-  на read был штатно восстановлен authorized gateway, auth-правок не требуется.
-- Новые требования: сохранять найденный набор/текущую задачу между репликами до смены
-  темы; find+delete all matching; сбор CREATE/UPDATE недостающих полей за несколько реплик.
-- Факты trace: SEARCH30 → DELETE с новым query/source_date → candidates=none;
-  другая SEARCH days7 завершила ход без delete; CREATE с title/date, без time → Error,
-  следующая реплика стала DELETE → candidates=none. Тексты/значения редактированы.
-- Причины в коде: recentEvents — только список, нет draft/active intent/missing slots;
-  planner не получает typed session context; re-search имеет приоритет над recent set;
-  multi-write намеренно запрещён prompt, executor рассчитан на один target.
-- Предложить согласованный scope: app-side Calendar session state, draft slot filling,
-  use-context selection, bounded batch confirmation/results, week bounds/pagination.
-  Production code этого блока ещё не изменён, ожидается согласие на расширение архитектуры.
-  Capture остановлен, stderr пуст. Исходные фразы с содержимым событий не сохраняются.
+Пользователь принял последнюю сборку после ручной проверки на OnePlus CPH2581:
+«отлично теперь все работает» и явно попросил commit. Ранее отдельно приняты поиск
+и жизненный цикл Google Tasks. Source-selection fix установлен через install -r — Success.
+Default нового запроса без «задача» = EVENT; refs/slots сохраняют реальный kind.
+Захват логов завершён; при проверке PID процесс уже отсутствовал. Отдельные HTTP-результаты
+последнего прогона не собирались: приёмка зафиксирована по сообщению пользователя.
 
-## UPDATE/DELETE: вариант 2 реализован, APK готов к ручной проверке (2026-10-27)
+## Единая Event/Task-система
 
-- Пользователь одобрил app-side resolver, уточнив сценарий переноса завтрашнего события
-  с одного часа на другой. Личные названия/полные фразы в документы не сохраняются.
-- Контракт расширен source_date/source_time (исходная цель), date/time = новые значения
-  UPDATE; parser проверяет типы, известные поля и длины. Prompt сохраняет UPDATE/DELETE
-  вместо замены намерения на отдельный SEARCH.
-- Executor хранит последние API candidates в памяти; разрешает цель через search/day/last
-  results, не доверяет неизвестному model ID. Несколько совпадений → UI выбора; затем
-  свежий GET → подготовка → подтверждение реального события/old→new → повторный GET → запись.
-- Новый CalendarEventUpdate.kt сохраняет исходный день/длительность при time-only,
-  поддерживает перенос all-day по дате; PATCH передаёт только изменённые поля.
-- Выбор/подтверждение очищаются при отмене, context — при новом чате/смене подключения;
-  generation guards не дают использовать старые candidates после переподключения.
-- `.\gradlew.bat :app:assembleDebug` — SUCCESS (финально 1 с), `git diff --check` — успешно.
-  Unit/UI tests и lint не запускались. После отдельного разрешения пользователя
-  OnePlus обнаружен, install -r — Success, данные сохранены.
-- Следующий шаг — включить capture и сразу сообщить о готовности; затем ручной
-  тест переноса/выбора/отмены/удаления. Работоспособность новой записи пока не заявлять.
-  Batch writes, общий LLM tool loop и pagination этим блоком не реализованы.
+- Один CalendarSession: taskId/version/phase/draft/targets/awaiting/selector/pendingSubject.
+  kind EVENT/TASK принадлежит приложению; нельзя применить Task op к Event refs и наоборот.
+- Task ID квалифицирован listId+taskId через GoogleTaskRef, а не произвольная model string.
+- CalendarEvent остаётся именем общей display projection, но kind/Task metadata сохраняют
+  настоящий источник. TASK создаётся только Tasks API, без companion Event/local reminder.
+- Модель получает snapshot + app operation/kind/transition и предлагает лишь field patches.
+  Старый unsupported-Tasks guard удалён, поля list/status добавлены без новых CalendarOp.
+- Общие resolve/choice/prepare/confirm/refetch/apply, no-op/partial outcomes и format-by-date.
+  GoogleApiHttp и GoogleApiAuthorization общие; 401 retry только чтений, никогда записей.
+- Google Tasks: каталог списков/выбор, чтение/поиск по спискам и due, создание, title/notes/
+  due update/clear, completed/needsAction, delete. Без периода — также undated/completed/
+  hidden/assigned задачи, с периодом фильтрация по due date, не времени выполнения.
+- due трактуется как дата, не Instant; UI Task не выдаёт неизвестное время за «весь день».
+  Запрос clock/duration сохраняет draft и просит убрать время, не создавая Event вместо Task.
+- Родитель с подзадачами не удаляется скрытым cascade; assigned delete отмечен в confirmation.
+- Task list catalog находится в Session, выбор списка — отдельная UI phase той же задачи.
+- Новый Event request не наследует task list/status filters. Possessive pronoun внутри
+  нового имени не считается ссылкой на старую задачу. Пустой read может продолжить query,
+  но write по-прежнему требует настоящих targets. TITLE slot не меняет kind на слово Event.
 
-## Даты/поиск/формат установлены, ожидается ручная проверка (2026-10-27)
+## OAuth и ручные шаги
 
-- По прямому запросу создан baseline commit `2db2b9f`:
-  `fix(calendar): restore event access and trace tool requests` (10 файлов).
-  AGENTS.md, исходный prompt/review и calendar-auth.log оставлены вне коммита.
-- Новый одобренный блок пока НЕ закоммичен: группы по локальной дате, жирные date headings
-  через Compose AnnotatedString, хронология, время начала/конца и all-day без Instant.parse
-  для date-only. Убрано обрезание отображения до 10, группируется вся полученная страница.
-- READ/SEARCH применяют date/days, локальные полуночи и exclusive end; одна указанная дата
-  по умолчанию = 1 день, без даты/числа дней READ=7/SEARCH=30. Ошибочные даты → UI error.
-  API singleEvents/orderBy=startTime разворачивают повторения и сортируют страницу.
-- Planner: явный SEARCH для условия поиска/завтра, текущий запрос отделён от истории
-  в одном user turn. Реальное поведение модели после этих правок ещё не проверено.
-- `.\gradlew.bat :app:assembleDebug` — SUCCESS (3 с), `git diff --check` — успешно.
-  Unit/UI tests и lint не запускались. Есть существующий deprecated LocalLifecycleOwner warning.
-- После подключения OnePlus `adb devices -l` видит CPH2581; `install -r` — Success.
-  Следующий шаг — capture, сразу сообщить «можно проверять» и остановиться.
-  Runtime-проверка новых группировок и SEARCH на завтра ещё не выполнена.
-- Ограничения: API по-прежнему возвращает первую страницу до 25 событий; pagination,
-  multi-step model loop и batch writes этим блоком не реализованы.
+- REQUIRED = calendar.events + https://www.googleapis.com/auth/tasks.
+- Connect/check/silent authorization/revoke используют один согласованный набор scopes;
+  явно неполный grant отклоняется. Tasks-функции приняты пользователем на устройстве.
+- Google Cloud Library: Tasks API, Data Access: tasks. Пользователь сообщил, что выполнил.
+- Не удалять данные/историю/модели; reauthorization не требует очистки storage.
+- Подробная инструкция и ограничения: GOOGLE_TASKS.md, схема: CALENDAR_FLOW.md, D022.
 
-## Optional-field fix готов к повторной проверке (2026-10-27)
+## Проверки и следующий шаг
 
-- По согласованию в `CalendarEvent.kt` location/description читаются с fallback `""`,
-  blank преобразуется в null; null больше не передаётся в optString и isNotBlank.
-- `HttpCalendarGateway.kt`: исключения логируют только class и фиксированный stage
-  (connect/write_request/response_status/read_response/parse_response/map_api_error).
-  Сообщения исключений и данные ответов в трассировку не добавлялись.
-- `.\gradlew.bat :app:assembleDebug` — успешно (1 с), финальная компиляция без новых
-  предупреждений; OnePlus `install -r` — Success. Автотесты/lint не запускались.
-- Далее запустить capture и сразу остановиться для пользовательского воспроизведения.
-  HTTP 200 был подтверждён предыдущим запуском; успешный вывод событий ещё не проверен.
-
-## Runtime: endpoint исправлен, HTTP 200, ошибка обработки ответа (2026-10-27)
-
-- Пользователь одобрил точечный route fix. `HttpCalendarGateway.kt`: base до
-  `/calendar/v3`, list/search/get под `/calendars/primary/events`, согласованы safe logs.
-  `.\gradlew.bat :app:assembleDebug` — успешно (1 с), `git diff --check` — успешно;
-  OnePlus `install -r` — Success. Автотесты/lint не запускались.
-- После запуска capture пользователь проверил READ: parser OK → authorization Ok →
-  правильный GET → HTTP 200 → error=ResponseOrRequestFailure → UI «Нет сети».
-  Значит HTTP-доступ работает; успешный разбор событий ещё не подтверждён.
-- Capture остановлен после проверки PID/аргументов, stderr пуст. Пользователь требует:
-  как только установка/capture готовы — сразу остановиться и сообщить «можно проверять».
-- Вероятный дефект по коду: CalendarEvent.fromItem вызывает isNotBlank на потенциально
-  null от optString для необязательных location/description. Точный класс исключения
-  текущая трассировка не показывает; all-day форматирование также требует отдельной проверки.
-- Следующий минимальный план (ещё не реализован): nullable-safe разбор этих двух полей
-  и диагностика класса/этапа исключения без message/payload. Получить согласие до правки.
-
-## Runtime: planner исправлен, обнаружен неверный API route (2026-10-27)
-
-- По разрешению пользователя новая сборка установлена на OnePlus через `install -r`
-  (Success); запущен и после воспроизведения остановлен фильтр CalendarAssistantDebug.
-- Два хода: parser OK READ и SEARCH → facade authorization=Ok → executor connected=true
-  → GET `https://www.googleapis.com/calendar/v3/users/me/events` → HTTP 404/NotFound
-  → tool_result=Error → UI. Наличие/отсутствие событий этими ответами не установлено.
-- Planner теперь реально вызывает инструменты; подтверждённый следующий блокер — route.
-  По API events.list нужен `/calendar/v3/calendars/{calendarId}/events`, primary допустим.
-- Предложен минимальный fix только `HttpCalendarGateway.kt`: base URL до `/calendar/v3`,
-  list/search/get под `/calendars/primary/events`; существующие пути записи используют
-  `/calendars/...` и станут согласованными с base. Пока fix не внесён, ожидается согласие.
-- «Завтра» ещё не поддержано корректно executor; во втором ходе SEARCH date=null.
-  Сначала подтвердить чтение календаря, затем отдельный блок date-range/batch/model loop.
-
-## Planner fix, первый согласованный блок (2026-10-27)
-
-- Изменены `CalendarToolSpec.kt`, `ChatViewModel.kt`: planner получает категорию state
-  без email/сообщений ошибок, текущую дату/время/zone устройства; правила охватывают
-  READ/CREATE/UPDATE/DELETE/SEARCH. Для изменения/удаления без ID сначала READ/SEARCH.
-- Из planner input исключены свободные assistant-ответы; последние три user-сообщения
-  сохранены. Обычная история чата не менялась. Диагностика теперь показывает
-  `connection_state_in_prompt=true`. Prompt не заменяет валидацию в приложении.
-- Уточнено требование пользователя: все пять команд из `CALENDAR_IMPLEMENT_PROMPT.md`,
-  один день/диапазоны и одно/несколько событий. Полное выполнение НЕ реализовано этим блоком:
-  нет date-range/batch контракта и multi-step tool loop, READ пока игнорирует date,
-  app-side проверка записи недостаточна. Множественная запись не должна сводиться
-  к одному событию; пока prompt направляет её на уточнение, это не batch-поддержка.
-- `.\gradlew.bat :app:assembleDebug` — BUILD SUCCESSFUL (2 с); `git diff --check` — успешно.
-  Автотесты/lint не запускались; новая сборка на устройство не устанавливалась.
-- Следующий шаг: согласовать расширенный Calendar-блок: валидируемые диапазоны/пакеты,
-  идентификация целей, подтверждение каждого действия, structured tool results/model loop,
-  endpoint и корректные границы периода. Успех новой маршрутизации на устройстве не проверен.
-
-## Runtime checkpoint после воспроизведения (2026-10-27)
-
-- Пользователь отдельно разрешил обновить приложение и захватить логи на OnePlus CPH2581.
-  `adb -s <selected-device> install -r .../app-debug.apk` — Success, без очистки данных.
-- Фильтр `CalendarAssistantDebug:I *:S` захвачен в локальный temp-файл вне репозитория.
-  После воспроизведения соответствующий процесс logcat остановлен; stderr пуст.
-- Подтверждено одним ходом: state=Connected → planner termination=EOG →
-  `{"tool":"NONE"}` → parser unsupported_NONE → normal_chat COMPLETE.
-  Executor/HTTP не достигнуты. Это ошибка выбора инструмента; повреждённый JSON,
-  авторизация и HTTP-ошибка не объясняют именно этот ход. Валидность API-доступа ещё не проверена.
-- Следующий шаг: согласовать минимальный первый fix — актуальный connection state
-  и явные READ-примеры в planner prompt, исключение влияния прежних свободных ответов
-  об отсутствии доступа на planner. Реализация пока не начата. Проверка: READ → HTTP;
-  окончательный ответ и date-range потребуют отдельной оценки по следующим логам.
-
-## Текущая задача: временная диагностика Calendar chain (2026-10-27)
-
-- По запросу пользователя добавлена только debug-трассировка `CalendarAssistantDebug`:
-  planner state/input shape → redacted raw + length → parser → facade authorization →
-  executor → authorized gateway → HTTP method/route/status/error → final result.
-- Один случайный ID проходит через coroutine context, включая `Dispatchers.IO`.
-  Произвольные строки planner/параметров скрыты; токены, email, заголовки,
-  содержимое событий, тела ответов и сообщения исключений в эту трассировку не попадают.
-- Бизнес-логика, промпты, парсер, авторизация, endpoint и зависимости не исправлялись.
-  Подтверждено кодом: state не передаётся planner; tool result не возвращается модели;
-  READ игнорирует date. Корректность `/calendar/v3/users/me/events` из review не доказана.
-- `:app:tasks --all` и `.\gradlew.bat :app:assembleDebug` — успешно; сборка 4 с.
-  Unit/UI tests и lint не запускались в рамках согласованной диагностической сборки.
-  Устройства не проверялись; adb, установка APK, commit/push не выполнялись.
+- `.\gradlew.bat :app:assembleDebug` — SUCCESS (финальный прогон 1 с).
+- `git diff --check` — успешно.
+- Unit/UI tests и отдельная test compilation НЕ запускались по текущему запрету пользователя;
+  lint не запускался (согласована сборка). Добавлен GoogleTasksWorkflowTest, старые source
+  regression tests актуализированы; наличие тестов не является PASS.
+- Source-selection APK установлен, ручная приёмка принята пользователем.
+  Текущий checkpoint подготовлен к commit по прямой команде; push не запрашивался.
 - APK: `app/build/outputs/apk/debug/app-debug.apk`.
-- Следующий шаг: пользователь воспроизводит запрос и возвращает логи по тегу;
-  затем предложить минимальный план исправления, получить согласие до реализации.
+- Следующий шаг: завершить запрошенный commit, затем выбирать новую задачу с пользователем.
+  Новые install/device access/проверки требуют разрешения в соответствующей задаче.
 
-## Календарь: явная проверка по кнопке (2026-10-27) — собрано, ждёт ручной проверки на телефоне
+## Фон и границы
 
-Убраны две причины «бесконечной проверки»:
-1. `CalendarAuthManager.initialState()` больше не ставит `Checking` при наличии
-   сохранённого токена: состояние восстанавливается из локальных данных
-   (`Disconnected` / `NeedsReconnect` / `Connected(email)`).
-2. `ChatScreen` больше не запускает `checkConnection()` автоматически при открытии
-   вкладки «Календарь». Проверка выполняется только по кнопке «Проверить».
-
-Добавлено:
-- `CalendarAuthManager.cancelCheck()` — отменяет активную проверку, инкрементит
-   generation (поздние GMS-колбэки отбрасываются), восстанавливает состояние из
-   сохранённых данных; отмена НЕ считается ошибкой авторизации.
-- `checkConnection()` ловит `CancellationException` и таймаут отдельно; в обоих
-  случаях состояние восстанавливается из локальных данных, а не падает в `Checking`.
-- `CalendarViewModel.checkConnection()` / `cancelCheck()` — явные действия UI.
-- Ветка `Checking` в `CalendarSettingsCard`: индикатор + disabled «Проверить» +
-  enabled «Отменить проверку». Заголовок карточки — «Google-аккаунт».
-- `MainActivity` пробрасывает `onCalendarCheck` и `onCalendarCancelCheck`.
-
-Проверки: `:app:assembleDebug` — успешно (4 с). Устанавливать/тестировать на
-устройстве — задача пользователя. Коммит не создавался.
-
-## Calendar auth lifecycle (2026-10-27) — код готов, проверка на телефоне впереди
-
-Исправлены два дефекта авторизации Google Календаря:
-1. Settings больше не выводит «Подключён» из сохранённого токена: статус строится только
-   после `AuthorizationClient.authorize()`; resolution → `NeedsReconnect`, offline →
-   `Unavailable`, успех → `Connected`. Ложный `expiresAt` удалён (schema v3).
-2. «Отключить» → «Подключить» снова работает: `disconnect` очищает локальное состояние,
-   вызывает `clearToken`, затем best-effort `revokeAccess(Account)`; `connect` заново
-   вызывает `authorize()` и при необходимости запускает consent. Late-callback после
-   disconnect отбрасывается по generation.
-
-Дополнительно: единая точка получения токена (`ensureToken`) перед каждой операцией;
-401 инвалидирует токен и повторяет только идемпотентные чтения; записи не повторяются;
-403 разделён на rate-limit / configuration / forbidden. Зависимость
-`play-services-auth` поднята 21.3.0 → 21.4.0 (в 21.3.0 нет `ClearTokenRequest`,
-`RevokeAccessRequest`, `clearToken`, `revokeAccess`; проверено по AAR и `javap`).
-
-Первый прогон на CPH2581 показал `googleRevoked=false`: Authorization API не сообщает
-email, а `revokeAccess` требует `Account`. Добавлен системный `AccountPicker` (без новых
-разрешений) и `setAccount`; выбранный email сохраняется и используется для revoke.
-Старые сессии без email требуют повторного выбора аккаунта.
-
-Проверки: `:app:compileDebugKotlin`, `:app:testDebugUnitTest` (76 тестов, 0 failures;
-добавлены 5 тестов `AuthorizedCalendarGatewayTest`), `:app:assembleDebug`,
-`:app:lintDebug` — успешно. Новая сборка с AccountPicker на телефон ещё не установлена;
-нужен `install -r` и ручной сценарий connect → disconnect → check → connect.
-Планировщик календаря (0 символов ответа / переполнение контекста) остаётся отдельной
-задачей.
-
-## Веха
-M1 завершена, M2 в основном реализована и проверена на эмуляторе, M3 (STT) реализована
-и проверена на эмуляторе. Приложение — офлайн-чат на локальной Qwen3-1.7B Q4_K_M через
-вендоренный llama.cpp + голосовой ввод через whisper.cpp: запись аудио 16 кГц,
-транскрипция, вставка в черновик без автоотправки, отмена записи и распознавания.
-Модель загружается в приватное хранилище приложения, ответ генерируется и стримится
-в Compose-интерфейс, история сохраняется на диск, после перезапуска восстанавливается.
-
-Проверено на `emulator-5554` (x86_64, API 37, 6 ГБ RAM, 6 потоков, `n_ctx=2048`):
-загрузка модели, подсчёт токенов промпта, многоходовый контекст (модель помнит имя из
-предыдущего хода), потоковый вывод, сохранение истории, восстановление после
-`force-stop`/перезапуска, отображение ошибок, «Новый чат», остановка генерации до первого
-токена и во время генерации (частичный текст + «Остановлено», ошибки нет), генерация
-после отмены, скачивание модели внутри приложения (SHA-256 сошёлся), импорт GGUF через
-SAF, генерация при выключенной сети. Модель на устройстве: `1 282 439 584` байт,
-SHA-256 совпал с пиннингом.
-
-Не проверено: release-сборка, выгрузка модели и повторная загрузка через UI, долгая
-сессия/нагрев/нехватка RAM. Подробный отчёт с таблицей PASS/NOT TESTED и методикой:
-`docs/IMPLEMENTATION_REPORT.md`.
-
-## M2 — стабильность многоходовой генерации на CPH2581 (2026-10-26)
-
-Исправлены два дефекта, найденные при ручной проверке на реальном arm64-телефоне
-OnePlus CPH2581 (`2d46124b`, `n_ctx=2048`, 6 потоков):
-
-1. **`<|im_end|>` в ответе.** Причина: `llama_jni.cpp` намеренно отдавал EOG-токен в
-   колбэк с `special=true`; у Qwen EOG — это `<|im_end|>`. Он попадал и в UI, и в
-   `conversation.json`. Теперь EOG-токен не рендерится, обычные куски идут с
-   `special=false` (CONTROL/UNKNOWN → пусто), плюс Kotlin-фильтр `SpecialTokenFilter`
-   на границе стриминга и очистка уже сохранённого текста в `ConversationStore.load`.
-2. **SIGABRT после нескольких сообщений.** Причина: промпт (681 токен) декодировался
-   одним `llama_batch_get_one`, а `n_batch=512`; `llama_context::decode` падал на
-   `GGML_ASSERT(n_tokens_all <= cparams.n_batch)`. Теперь промпт префиллится чанками
-   по `n_batch`; переполнение контекста возвращает `CONTEXTEXHAUSTED|…` и не декодируется.
-   Попутно исправлен `LlamaEngine.parseTermination`: `substringBefore('|', "")` превращал
-   `BUDGET`/`CANCELLED` в `EOG`, из-за чего обрезанный ответ помечался `COMPLETE`.
-
-Проверено на CPH2581 (`install -r`, данные сохранены): промпты 686/725/1024+ токенов
-больше не падают; длинный ответ 1024 токена / 4870 символов помечен `TRUNCATED` с
-плашкой «Ответ остановлен по ограничению длины»; короткий ответ — EOG/`COMPLETE`;
-отмена — `INTERRUPTED`; повторные отправки после completed/truncated/cancelled работают;
-история (26 сообщений, включая `TRUNCATED`/`INTERRUPTED`) пережила перезапуск;
-`<|im_end|>` отсутствует в UI и в файле; «+» очищает чат, архивной функции нет.
-Юнит-тесты: 63 теста, 0 failures; lint — успешно.
-
-## M2 — продолжение обрезанного ответа и стабильный автоскролл (2026-10-26)
-
-Добавлено продолжение ответа, остановленного по лимиту длины, и переработан
-автоскролл списка сообщений.
-
-- **Продолжение.** У `TRUNCATED`-сообщения рядом с «Копировать» появилась кнопка
-  «Продолжить» (во время генерации — «Продолжаем…», disabled). Новых сообщений и
-  реплик не создаётся: частичный текст передаётся в native как `assistantPrefix`,
-  шаблон рендерится с `add_generation_prompt=true`, префикс дописывается к промпту,
-  и модель продолжает тот же ход. В промпт идут только `COMPLETE`-ходы с
-  `id < targetId`; старые ходы отбрасываются, пока промпт + префикс не помещаются.
-  Формула бюджета не менялась: `min(1024, n_ctx − prompt − 8)`.
-- **Статусы продолжения:** `CANCELLED → INTERRUPTED`, `BUDGET → TRUNCATED`
-  (кнопка остаётся), `CONTEXT → TRUNCATED` + ошибка, `ERROR → FAILED` + ошибка,
-  `EOG → COMPLETE` (кнопка исчезает).
-- **Автоскролл.** `autoFollow` выключается при `DragInteraction.Start` и включается
-  только когда пользователь снова у нижней границы и не выполняет drag. Рост текста
-  сам по себе фоллоу не отключает; при остановке у низа список доводится до конца
-  (включая высокие сообщения). Статус сообщения входит в ключи эффекта, поэтому
-  появившиеся плашка и кнопки тоже остаются в зоне видимости.
-- **Дефекты, найденные при smoke-тесте:** (1) смена статуса `STREAMING → TRUNCATED`
-  добавляла плашку/кнопки, но эффект не перезапускался по неизменившейся длине текста;
-  (2) продолжение отклонялось планировщиком, если префикс длинный, из-за резерва
-  полного `CAP_TOKENS`; теперь резервируется только `MIN_OUTPUT_TOKENS`, а реальный
-  бюджет считает `computeMaxTokens`.
-
-Проверено вручную на `emulator-5554` (x86_64, `n_ctx=2048`, `install -r`): длинный
-ответ 1024 токена / 4862 символа → `TRUNCATED` + кнопка; продолжение дописало текст в
-то же сообщение без новой пары (лог `prefix=4884 bytes`, бюджет 933) и завершилось
-EOG → `COMPLETE`, кнопка исчезла; прокрутка вверх во время стрима не сбивается новыми
-токенами, возврат к низу снова включает фоллоу; после перезапуска 6 сообщений и
-продолженный текст восстановлены, `im_end`/`im_start` в файле отсутствуют.
-Юнит-тесты: 71, 0 failures; lint — успешно. На CPH2581 (`2d46124b`) ещё не проверено.
-
-## M3 (STT через whisper.cpp) — статус на 2026-10-25
-
-| Пункт | Статус | Тип подтверждения |
-|---|---|---|
-| Модуль `:whisper` (NDK, вендоренный whisper.cpp) | Реализовано, собирается | `assembleDebug` — успешно (APK 2026-10-25 15:23:52) |
-| Транскрипция русского аудио (фикстура) | PASS | Автоматизированный: `WhisperEngineTest` — 9.0 с |
-| Отмена транскрипции (null + восстановление) | PASS | Автоматизированный: `WhisperCancellationTest` — 3/3 PASS (4899/5328/4888 мс) |
-| Qwen→Whisper→Qwen в одном процессе | PASS | Автоматизированный: `NativeHandoffTest` — 15.9 с |
-| Юнит-тесты M3 (PcmResampler, AsrTranscript, WhisperModelStore) | PASS | Автоматизированный: 13 тестов, 0 failures (2026-10-24 20:34:56) |
-| Lint M3 | PASS | 0 errors, 22 warnings (2026-10-24 20:39:02) |
-| Запись реального голоса (микрофон хоста эмулятора) | PASS | Ручная проверка пользователя |
-| Транскрипция (в контексте записи) | PASS | Ручная проверка пользователя |
-| Вставка распознанного текста в редактируемый черновик | PASS | Ручная проверка пользователя |
-| Скачивание модели через UI | PASS | Проверка агента/рантайма (аудит, §5) |
-| Запись аудио (16 кГц, fallback 48/44.1), лимит 60 с | Реализовано в исходнике | `voice/AudioRecorder.kt` |
-| Черновик при уходе в фон, отмена записи/распознавания | Реализовано в исходнике | `voice/VoiceViewModel.kt` |
-| Фильтр неречевых меток | Реализовано в исходнике | `asr/AsrTranscript.kt` |
-| Явная отправка черновика в Qwen из редактора | NOT TESTED | Не выводилось из ручных проверок |
-| Микрофон реального Android-телефона | NOT TESTED | Отложено |
-| Количественная точность распознавания на заданном наборе | NOT TESTED | Требует заданного набора данных |
-| Изменения Whisper закоммичены | ДА | Phase 1 коммит `7b1d27a` (2026-10-26), по явному разрешению |
-
-Подробности: `docs/IMPLEMENTATION_REPORT.md` §11–18.
-
-Применимость доказательств (времена, часовой пояс, изменения после проверок):
-`docs/IMPLEMENTATION_REPORT.md` §13.
-
-## Стек и конфигурация
-- Gradle Wrapper 9.6.0, JVM 25 (JBR Android Studio), AGP 9.4.1, Kotlin 2.2.10,
-  Compose BOM 2026.02.01, catalog `gradle/libs.versions.toml`.
-- `:app`; package/namespace `com.example.localassistant`; minSdk 26, target/compile SDK 37,
-  Java 11; build-tools 36.0.0.
-- NDK `30.0.16248370`, CMake `4.1.2`; `abiFilters` — `arm64-v8a`, `x86_64`.
-- Зависимости добавлены: coroutines 1.7.3, lifecycle-runtime/viewmodel-compose,
-  material-icons-core; тестовые — kotlinx-coroutines-test, org.json.
-- Manifest: `INTERNET` (скачивание весов), `RECORD_AUDIO` (запись голоса),
-  `uses-feature microphone required=false`, `android:name=".LocalAssistantApp"`,
-  `allowBackup=true`; календарь и RAG ещё не реализованы.
-- Вендоренный llama.cpp: `third_party/llama.cpp` (v0.7.0, commit `620d2225`, MIT,
-  подробности в `third_party/llama.cpp/VENDORING.md`).
-
-## Что реализовано
-- `llm/LlmNative.kt`, `llm/LlamaEngine.kt`: JNI-мост и движок; один выделенный поток,
-  `Mutex`, отмена через `AtomicBoolean`, инкрементальный UTF-8 декодер.
-- `llm/ReasoningFilter.kt`: отбрасывает блок рассуждений (`<think>`, `思考和`,
-  fullwidth `response`), если модель всё же «думает».
-- `chat/`: `ChatViewModel` (состояния, стриминг, отмена, ошибки), `ContextPlanner`
-  (системный промпт + последние ходы в пределах `n_ctx - 256 - 8`), `ConversationStore`
-  (JSON в `filesDir`, `STREAMING` → `INTERRUPTED` после падения процесса), Compose-экран.
-- `model/`: `ModelSpec` (пиннинг URL/размер/SHA-256), `GgufHeader` (проверка магии),
-  `ModelStore`, `ModelDownloader`, `ModelRepository` (скачивание, импорт SAF, удаление,
-  повторная загрузка), `ModelGateway`.
-- `LocalAssistantApp.kt`: ручной DI-контейнер (движок, репозиторий, хранилище диалога).
-- Нативные логи `LlmNative`/`LlamaEngine` помогают диагностировать загрузку и генерацию.
-
-## Проверки (2026-10-24, после правок)
-| Команда | Результат |
-|---|---|
-| `.\gradlew.bat :app:assembleDebug` | успешно, APK с `arm64-v8a` и `x86_64` |
-| `.\gradlew.bat :app:testDebugUnitTest` | успешно, 25 тестов, 0 failures |
-| `.\gradlew.bat :app:lintDebug` | успешно, 21 warning, 0 errors |
-
-Ручная проверка на эмуляторе: запрос `Hello` → ответ `Hello! How can I assist you today?`,
-история пережила перезапуск приложения.
-
-## Известные проблемы и ограничения
-- Исправленный баг: `llama_tokenize` в этой ревизии возвращает отрицательное значение как
-  «сколько нужно токенов», а не только ошибку; теперь размерный проход это учитывает.
-- `countPromptTokens` при ошибке возвращает `-1`, `ContextPlanner` в этом случае отказывает
-  в запросе (а не считает, что всё помещается).
-- Пустой неудачный ответ больше не показывает «Печатает…»: индикатор только у `STREAMING`.
-- Остановка до первого токена теперь даёт `INTERRUPTED`, а не «пустой ответ»; проверка
-  отмены идёт раньше проверки пустоты (тест `stop before the first token ...`).
-- Качество ответов на русском и поведение на реальном телефоне не измерены.
-- Скачивание весов и импорт GGUF проверены на эмуляторе; на телефоне — нет.
-- Список сообщений теперь следует за стримом только у нижней границы; ручная
-  прокрутка вверх больше не перебивается новыми токенами (M2, 2026-10-26).
-- Обрезанный ответ можно продолжить кнопкой «Продолжить»; при нехватке контекста
-  показывается ошибка, статус остаётся `TRUNCATED`.
-- Убийство процесса во время генерации теряет уже показанный частичный текст: после
-  перезапуска ход выглядит как пустое «Остановлено» (статус верный, текст не сохранён).
-- При готовой модели из UI недоступны «Импорт GGUF» и «Удалить»: в диалоге они скрыты
-  (`compact = true`), а нижняя панель показывается только при `status != Ready`.
-- `models/` и `*.gguf.part` в `.gitignore`; веса и аудио в репозиторий не попадают.
-
-## Git (2026-10-26)
-- **Phase 1 коммит создан локально:** `7b1d27a` на ветке `master`.
-- Сообщение: `feat: verified speech input, transcription, and chat persistence`.
-- В коммите: исходники приложения, юнит-тесты, Gradle-конфигурация, `docs/`,
-  вендоренные `third_party/llama.cpp` (v0.7.0) и `third_party/whisper.cpp`
-  (необходимы для воспроизводимых локальных сборок). Итого 2049 файлов.
-- Исключены из коммита и рабочего дерева (`.gitignore`): `whisper/` (CMake-модуль
-  сборки), `.idea/`, `diagnostics/`; как и ранее — `models/`, `*.gguf.part`, кэши,
-  сгенерированные артефакты, секреты.
-- Remote **не настроен**, коммит **не пушится** (по требованию).
-- В рабочем дереве остались незакоммиченные instrumented-тесты
-  `app/src/androidTest/.../asr/{WhisperEngineTest,WhisperCancellationTest,NativeHandoffTest}.kt`
-  (не входят в Phase 1).
-
-## Следующие шаги
-
-### M2 (офлайн-чат)
-1. Прогнать на реальном телефоне по инструкции `docs/IMPLEMENTATION_REPORT.md` §9.
-2. Согласовать исправление дефектов §7 отчёта (автоскролл, частичный текст при падении,
-   доступ к импорту/удалению при готовой модели).
-
-### M3 (STT через whisper.cpp)
-3. ~~Отмена транскрипции~~ — **завершена** (3/3 PASS, 4888–5328 мс, см. §11 отчёта).
-4. ~~Запись аудио, UI, правка текста~~ — **реализовано** (§12–18 отчёта): запись 16 кГц
-   (fallback 48/44.1), лимит 60 с, черновик при уходе в фон, вставка в поле ввода без
-   автоотправки, скачивание/импорт/удаление модели, фильтр неречевых меток.
-5. Микрофон реального arm64-телефона и количественная точность распознавания на
-   заданном наборе — **отложено** (запись через микрофон хоста эмулятора уже проверена
-   пользователем вручную — PASS).
-6. Коммитить изменения Whisper — **только с явного разрешения** пользователя.
-
-## Не определено
-- Модель телефона, RAM и ОС целевого устройства; отсюда — реальные лимиты `n_ctx` и потоков.
-- Финальная Whisper-модель, embedding-модель для RAG, размер локальной базы.
-- Нужен ли выбор кванта Q4_0 альтернативно Q4_K_M.
+- Приняты ранее: Event READ/SEARCH/CREATE, single PATCH200/DELETE204, date-group headings,
+  multi-turn создание, перенос с сохранением длительности. Последний набор ручных сценариев
+  принят; полный автоматический regression matrix (DST/лимиты/ошибки) этим не доказан.
+  Логи не содержат private titles/query/token/body; capture завершён.
+- Lists: просмотр/выбор, не CRUD самих списков; move между списками не реализован.
+  Scheduled time/duration/recurrence не предоставляет текущий public Tasks adapter.
+- Limits: catalog100, result500, batch100, date range90. Batch не транзакция; in-memory state.
+- M1 завершена; M2 локальный Qwen/история/продолжение и M3 STT реализованы, прошлые
+  проверки — IMPLEMENTATION_REPORT.md. Вне scope RAG/заметки, physical STT, release/нагрев.
+- Версии/зависимости/Manifest/native не менялись. Parent checkpoint b1fb5e7 сохранён.
+  Пользовательские AGENTS.md/prompt/review/auth log не включать в feature commit.

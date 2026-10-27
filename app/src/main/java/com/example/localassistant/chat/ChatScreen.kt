@@ -161,6 +161,7 @@ fun ChatScreen(
     val pendingCalendar by calendar.pendingConfirmation.collectAsStateWithLifecycle()
     val calendarSummary by calendar.confirmationSummary.collectAsStateWithLifecycle()
     val targetSelection by calendar.targetSelection.collectAsStateWithLifecycle()
+    val taskListSelection by calendar.taskListSelection.collectAsStateWithLifecycle()
     val statusNote by calendar.statusNote.collectAsStateWithLifecycle()
     val showCalendarSettings by calendar.calendarSettingsPrompt.collectAsStateWithLifecycle()
 
@@ -321,11 +322,29 @@ fun ChatScreen(
         )
     }
 
+    taskListSelection?.let { selection ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { calendar.selectTaskList(null) },
+            title = { Text("Выберите список Google Tasks") },
+            text = {
+                Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                    selection.candidates.forEachIndexed { index, list ->
+                        TextButton(modifier = Modifier.fillMaxWidth(), onClick = { calendar.selectTaskList(list.id) }) {
+                            Text("${index + 1}. ${list.title}")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { calendar.selectTaskList(null) }) { Text("Отмена") } },
+        )
+    }
+
     val selection = targetSelection
     if (selection != null) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { calendar.selectTarget(null) },
-            title = { Text("Выберите событие для ${if (selection.operation == com.example.localassistant.calendar.CalendarOp.DELETE) "удаления" else "изменения"}") },
+            title = { Text("Выберите ${if (selection.candidates.firstOrNull()?.kind == com.example.localassistant.calendar.CalendarObjectKind.TASK) "задачу" else "событие"} для ${if (selection.operation == com.example.localassistant.calendar.CalendarOp.DELETE) "удаления" else "изменения"}") },
             text = {
                 Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                     selection.candidates.forEach { event ->
