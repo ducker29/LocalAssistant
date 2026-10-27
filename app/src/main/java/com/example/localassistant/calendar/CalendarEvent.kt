@@ -1,6 +1,13 @@
 package com.example.localassistant.calendar
 
 import org.json.JSONObject
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
+import java.util.Locale
 
 /** A single event as returned by the Calendar API (only the fields we surface). */
 data class CalendarEvent(
@@ -13,17 +20,33 @@ data class CalendarEvent(
     val description: String?,
 ) {
     /** Stable human line, e.g. "Созвон (2026-10-27 10:00)". Never contains tokens. */
-    fun summary(now: java.time.ZonedDateTime): String {
-        val whenText = start?.let { formatInstant(it, now) } ?: "без даты"
+    fun summary(now: ZonedDateTime): String {
+        val whenText = startInZone(now.zone)?.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+            ?.let { "$it, ${timeLabel(now.zone)}" } ?: "без даты"
         val name = title.ifBlank { "(без названия)" }
         return "$name — $whenText"
     }
 
-    private fun formatInstant(rfc3339: String, now: java.time.ZonedDateTime): String {
-        val zdt = java.time.Instant.parse(rfc3339).atZone(now.zone)
-        return zdt.format(
-            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
-        )
+    fun startInZone(zone: ZoneId): ZonedDateTime? = parseMoment(start, zone)
+
+    fun timeLabel(zone: ZoneId): String {
+        if (allDay) return "Весь день"
+        val from = startInZone(zone) ?: return "Время не указано"
+        val timeFormat = DateTimeFormatter.ofPattern("HH:mm")
+        val until = parseMoment(end, zone) ?: return from.format(timeFormat)
+        val endFormat = if (until.toLocalDate() == from.toLocalDate()) timeFormat
+            else DateTimeFormatter.ofPattern("d MMM HH:mm", Locale.forLanguageTag("ru"))
+        return "${from.format(timeFormat)}–${until.format(endFormat)}"
+    }
+
+    private fun parseMoment(value: String?, zone: ZoneId): ZonedDateTime? {
+        if (value.isNullOrBlank()) return null
+        return try {
+            if (allDay) LocalDate.parse(value).atStartOfDay(zone)
+            else Instant.parse(value).atZone(zone)
+        } catch (_: DateTimeParseException) {
+            null
+        }
     }
 
     companion object {

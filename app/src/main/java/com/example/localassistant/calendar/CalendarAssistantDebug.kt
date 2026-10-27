@@ -27,7 +27,7 @@ object CalendarAssistantDebug {
     fun redactedRaw(raw: String): String {
         val allowed = setOf(
             "tool", "date", "time", "duration", "end_time", "all_day", "title",
-            "description", "location", "event_id", "query", "days",
+            "description", "location", "event_id", "query", "days", "source_date", "source_time",
             "READ", "CREATE", "UPDATE", "DELETE", "SEARCH", "NONE",
         )
         val tokens = Regex("\"(?:\\\\.|[^\"\\\\])*\"|[{}\\[\\]:,`]|\\s+|[^\"{}\\[\\]:,`\\s]+|\"")
@@ -50,7 +50,8 @@ object CalendarAssistantDebug {
             "duration=${field(request.duration)}, end_time=${field(request.endTime)}, " +
             "all_day=${request.allDay}, days=${request.days}, title=${field(request.title)}, " +
             "description=${field(request.description)}, location=${field(request.location)}, " +
-            "event_id=${field(request.eventId)}, query=${field(request.query)}"
+            "event_id=${field(request.eventId)}, query=${field(request.query)}, " +
+            "source_date=${field(request.sourceDate)}, source_time=${field(request.sourceTime)}"
     }
 
     fun rejection(reason: String): String = when {

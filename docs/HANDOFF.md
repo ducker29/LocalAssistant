@@ -1,29 +1,115 @@
 # Передача контекста проекта
 
-## Последний успешный тест и новые требования (2026-10-27)
+## Новый запрос: multi-turn контекст, draft creation и batch writes (2026-10-27)
 
-Пользователь подтвердил актуальный ответ после optional-field fix. Два хода в trace:
-READ days=7 → HTTP 200/error=None → executor Ok → UI. Во втором ходе тоже READ days=7,
-query=null, date_parameter_applied=false; новый HTTP-запрос, не cache replay.
-Capture остановлен с проверкой PID/аргументов; stderr пуст. Чтение календаря подтверждено.
+Пользователь принял single UPDATE/DELETE. Последний capture остановлен с проверкой PID,
+stderr пуст. Подтверждено: PATCH200/Ok и DELETE204/Ok после lookup/confirmation/refetch.
+401 перед первым search был успешно восстановлен через token invalidate/retry, не чинить auth.
 
-Пользователь просит: (1) хронологические группы событий по датам, дата жирная,
-события под ней; (2) вопрос о конкретном типе событий на завтра должен учитывать
-условие и день, а не повторять недельный список. Личные названия/содержимое не сохраняем.
+Новые сценарии пользователя (обезличенно): найти события, следующей репликой изменить/
+удалить их; найти все совпадения за текущую неделю и удалить; начать CREATE без времени,
+следующей репликой дополнить время/подтвердить число месяца без потери title/op.
+Trace подтверждает: SEARCH defaults30 → DELETE с заново заполненными query/source_date
+→ none; SEARCH days7 завершился сам; CREATE title/date/duration без time → Error;
+следующий slot-like ответ ошибочно стал DELETE/source_date/source_time → none.
+Точные значения date/query/time в trace скрыты, не заявлять, что восстановлены из него.
 
-Факты кода: CalendarToolExecutor.formatList — events.take(10), без сортировки/групп,
-READ всегда now..now+7 и header «На этой неделе», SEARCH тоже игнорирует date.
-Planner отдаёт READ вместо нужного SEARCH; нужны latest-message priority и пример
-SEARCH date=tomorrow days=1. Date/days должны применяться приложением, не только prompt.
-ChatScreen.MessageBubble — plain Text, поддержки Markdown нет. Для жирных date headings
-нужен narrow AnnotatedString renderer без новой зависимости/изменения сохранённых чатов.
-CalendarEvent formatter всегда Instant.parse; учесть all-day LocalDate для новых групп.
+Диагноз: recentEvents хранится executor в памяти, но нет active-task state/drafts/missing
+slots, planner видит лишь последние user turns, не app session. Query re-search раньше
+cached IDs заново задаёт диапазон; текущий prompt явно отказывает в multiple writes.
+Поэтому исправление не сводить к увеличению history или примерам prompt.
 
-Следующий предложенный scope ожидает согласия: форматтер/сортировка/группы + локальные
-границы date/days для READ/SEARCH + routing examples + date-heading rendering; без
-batch writes и общей multi-step архитектуры. Приёмка: недельный ответ по датам/времени,
-следующий SEARCH tomorrow даёт только выбранный день/условие или ясный пустой результат.
-После одобренной сборки/install/capture сразу сообщать «можно проверять» и ждать.
+Предлагаемый следующий scope (ЕЩЁ НЕ СОГЛАСОВАН): typed CalendarConversation state
+с active intent, selected result set/query/range, CREATE/UPDATE draft, missing fields;
+контролируемое merge уточнений без смены op; explicit continue/new-task/leave-calendar
+переходы, сброс при topic change/отмене/new-chat/account change. Существующие 5 CalendarOp
+сохранить. Для bulk: all_matching flag/selection, actual week bounds, pagination,
+review полного списка, UI confirmation, поэлементные outcomes без silent partial success
+и без авто-повтора неопределённых записей. Укладывать typed prompt context в 2048 tokens.
+Новая permission/зависимость не нужна. Значительное изменение state/schema/UI — получить
+согласие до реализации. Автотесты по-прежнему запрещены без отдельного разрешения.
+
+После одобрения/сборки отдельно получить разрешение на install/capture, затем сразу
+сообщать готовность и ждать «готово». Сейчас device install/build в новом scope не было.
+
+## UPDATE/DELETE: вариант 2 реализован, требуется runtime-приёмка (2026-10-27)
+
+Пользователь подтвердил вариант app-side resolver и сообщил пример переноса завтрашнего
+события с 10:00 на 08:00. Конкретное личное название не сохранять в документах.
+Предыдущая трассировка: READ/SEARCH200 и CREATE/POST200 работали; DELETE без ID ошибался
+после подтверждения, два DELETE с ID получали GET404. Самих HTTP DELETE/UPDATE не было.
+
+Новые изменения:
+- CalendarToolRequest.kt: optional sourceDate/sourceTime и признак allDaySpecified;
+  parser: string/boolean/int types, unknown-field rejection и ограничения длин.
+- CalendarToolSpec.kt: UPDATE/DELETE несут query и исходные date/time, приложение ищет
+  само; UPDATE date/time — destination, duration не выдумывать; обезличенный пример переноса.
+- CalendarToolExecutor.kt: recent API candidates in-memory, неизвестные model IDs не
+  служат целью; search/source day/last results, фильтр исходного времени; multiple →
+  target selection deferred с сохранённым write request; fetch → prepare → confirm →
+  refetch/compare → PATCH/DELETE. Отмена/finally чистят UI state, contextGeneration
+  блокирует stale candidates после смены подключения. Sync UPDATE/DELETE не подтверждаются.
+- Новый CalendarEventUpdate.kt: time-only оставляет день и исходную длительность;
+  partial update, timezone/DST validation, all-day date move с сохранением числа дней;
+  смена all-day/timed возвращает уточнение, не конвертирует автоматически.
+- HttpCalendarGateway.kt: PUT заменён PATCH, JSON содержит лишь заданные поля.
+- CalendarViewModel.kt + ChatScreen.kt: выбор реальных candidates, подробный confirmation
+  actual target / old→new, без новых зависимостей. ChatViewModel stop/new-chat отменяют
+  pending interactions, новый чат/подключение очищают API context.
+- CalendarAssistantDebug.kt: новые поля редактируются; только категории resolve,
+  none/single/multiple, validation и confirmed_plan без event text/ID.
+
+Проверки: финальный assembleDebug SUCCESS (1 с), git diff --check успешно.
+Первый compile показал optString(null) warning — исправлен typed safe cast;
+существующий LocalLifecycleOwner warning не относится к этому блоку.
+Unit/UI tests и lint не запускались (действует запрет автоматических тестов).
+После отдельного разрешения пользователя OnePlus обнаружен, новая сборка установлена
+через install -r — Success, данные сохранены. Commit/push не выполнялись.
+Следующая операция — capture; после запуска сразу сообщить «можно проверять» и
+прекратить работу до «готово».
+
+APK: `E:\Programs\Android\AndroidStudioProjects\LocalAssistant\app\build\outputs\apk\debug\app-debug.apk`.
+Приёмка: перенос выбранного события 10→08 с той же длительностью и днём, cancel не пишет;
+multiple показывает выбор; DELETE показывает точное имя/время и идёт только после confirm.
+Ожидаемый trace: UPDATE/DELETE → target_resolution → candidates → GET200 →
+awaiting_confirmation → confirmation=true → GET200 → confirmed_plan → PATCH200/DELETE204.
+Модель и Android HTTP PATCH ещё не проверялись в runtime; не утверждать успешность.
+Scope не включает batch writes, полную model/tool петлю и pagination. Старый baseline
+commit 2db2b9f сохранён; date-format и новые resolver-правки остаются незакоммиченными.
+
+## Актуальный блок: даты/поиск/группы установлены, ожидается проверка (2026-10-27)
+
+Пользователь попросил сначала commit baseline, затем одобрил блок дат/поиска/групп.
+Создан `2db2b9f fix(calendar): restore event access and trace tool requests`, 10 файлов;
+точный список/сообщение показаны перед коммитом. AGENTS.md и untracked prompt/review/log
+не включены. Новый блок не коммитить автоматически.
+
+Новые изменения:
+- CalendarEvent.kt: zone-aware start/time range, date-only all-day, безопасный fallback
+  для отсутствующего/невалидного времени; summary больше не падает на all-day.
+- CalendarTime.kt: QueryRange с границами целых local days; date без days → 1 день,
+  иначе READ=7/SEARCH=30; days ограничен 1..90, DST через LocalDate.atStartOfDay.
+- CalendarToolExecutor.kt: общий read/search period, проверка query/дат, заголовок по
+  периоду; все полученные события сортируются и группируются по start date;
+  markdown-подобные date heading строки для UI, больше нет take(10).
+- HttpCalendarGateway.kt: singleEvents=true/orderBy=startTime для recurring occurrences
+  и сортировки страницы. Лимит страницы 25 сохранён, pagination ещё нет.
+- CalendarToolSpec.kt + ChatViewModel.kt: date/days semantics, явный SEARCH tomorrow
+  days=1, приоритет текущего вопроса; history/current помечены в одном user turn.
+- ChatScreen.kt: узкий date-heading AnnotatedString renderer, жирные даты без новой
+  зависимости; user messages plain; формат сохранённых сообщений не менялся.
+
+Проверки: assembleDebug SUCCESS (3 с); diff --check — успешно. Unit/UI tests и lint
+не запускались по текущему scope. Существующий warning LocalLifecycleOwner deprecated.
+USB-блокер снят: пользователь подключил OnePlus, adb видит CPH2581;
+новая сборка установлена через install -r — Success, данные сохранены.
+APK: `E:\Programs\Android\AndroidStudioProjects\LocalAssistant\app\build\outputs\apk\debug\app-debug.apk`.
+Следующая операция: capture только CalendarAssistantDebug и СРАЗУ остановиться/сообщить готовность.
+Проверка пользователем: недельный список по жирным датам и времени; следующий вопрос
+о выбранном типе событий завтра → SEARCH/date tomorrow/days1, корректный период в UI.
+Поведение модели/Compose на устройстве ещё не проверено. Не утверждать, что всё исправлено.
+Baseline чтение подтверждено предыдущей сборкой HTTP200/Ok и пользователем.
+Дальнейший scope: pagination, диапазоны с end_date, multi-step tool loop, batch writes.
 
 ## Последняя установленная версия: optional fields + exception stage (2026-10-27)
 

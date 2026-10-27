@@ -12,6 +12,19 @@ import java.time.format.DateTimeFormatter
  */
 object CalendarTime {
 
+    data class QueryRange(val start: ZonedDateTime, val endExclusive: ZonedDateTime)
+
+    /** Whole local days, including across DST changes. A specific date defaults to one day. */
+    fun queryRange(date: String?, days: Int?, defaultDays: Int, now: ZonedDateTime): QueryRange {
+        val count = days ?: if (date == null) defaultDays else 1
+        require(count in CalendarToolRequest.MIN_DAYS..CalendarToolRequest.MAX_DAYS)
+        val firstDay = date?.let { resolveDate(it, now) } ?: now.toLocalDate()
+        return QueryRange(
+            firstDay.atStartOfDay(now.zone),
+            firstDay.plusDays(count.toLong()).atStartOfDay(now.zone),
+        )
+    }
+
     /** The RFC 3339 instant format used by the Calendar API. */
     fun rfc3339(zdt: ZonedDateTime): String =
         DateTimeFormatter.ISO_INSTANT.format(zdt.toInstant())

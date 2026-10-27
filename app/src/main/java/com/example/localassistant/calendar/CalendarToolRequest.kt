@@ -32,6 +32,9 @@ data class CalendarToolRequest(
     val eventId: String?,
     val query: String?,
     val days: Int?,
+    val sourceDate: String? = null,
+    val sourceTime: String? = null,
+    val allDaySpecified: Boolean = false,
 ) {
     companion object {
         const val MAX_TITLE = 200
@@ -61,7 +64,28 @@ object CalendarToolParser {
             return ParseOutcome.ToolParseError("Это не JSON-объект")
         }
 
-        val opName = json.optString("tool", null)
+        val stringFields = setOf(
+            "tool", "date", "time", "duration", "end_time", "title", "description",
+            "location", "event_id", "query", "source_date", "source_time",
+        )
+        val allowed = stringFields + setOf("all_day", "days")
+        for (key in json.keys()) {
+            if (key !in allowed) return ParseOutcome.ToolParseError("Неизвестное поле")
+            if (key in stringFields && !json.isNull(key) && json.opt(key) !is String) {
+                return ParseOutcome.ToolParseError("Неверный тип строкового поля")
+            }
+        }
+        if (json.has("all_day") && !json.isNull("all_day") && json.opt("all_day") !is Boolean) {
+            return ParseOutcome.ToolParseError("Неверный тип all_day")
+        }
+        for (key in stringFields - "tool") {
+            val limit = if (key == "title") CalendarToolRequest.MAX_TITLE else CalendarToolRequest.MAX_DETAIL
+            if (json.optString(key, "").length > limit) {
+                return ParseOutcome.ToolParseError("Превышена длина поля")
+            }
+        }
+
+        val opName = json.opt("tool") as? String
         if (opName == null) {
             return ParseOutcome.ToolParseError("Не указано поле \"tool\"")
         }
@@ -75,6 +99,9 @@ object CalendarToolParser {
         val days: Int? = if (json.has("days")) {
             val raw = json.opt("days")
             if (raw != null && raw != JSONObject.NULL) {
+                if (raw !is Number || raw.toDouble() != raw.toInt().toDouble()) {
+                    return ParseOutcome.ToolParseError("Неверный тип days")
+                }
                 val value = json.optInt("days")
                 if (value < CalendarToolRequest.MIN_DAYS || value > CalendarToolRequest.MAX_DAYS) {
                     return ParseOutcome.ToolParseError("\"days\" вне диапазона 1..${CalendarToolRequest.MAX_DAYS}")
@@ -97,6 +124,9 @@ object CalendarToolParser {
                 eventId = str("event_id"),
                 query = str("query"),
                 days = days,
+                sourceDate = str("source_date"),
+                sourceTime = str("source_time"),
+                allDaySpecified = json.has("all_day") && !json.isNull("all_day"),
             )
         )
     }

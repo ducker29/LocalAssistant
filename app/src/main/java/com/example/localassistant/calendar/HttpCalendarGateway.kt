@@ -52,7 +52,7 @@ class HttpCalendarGateway(
     }
 
     override suspend fun updateEvent(id: String, payload: UpdateEventPayload): Result<CalendarEvent> =
-        request("PUT", "/calendars/primary/events/${enc(id)}",
+        request("PATCH", "/calendars/primary/events/${enc(id)}",
             CalendarJson.updatePayload(payload).toString()) {
             CalendarJson.parseEvent(it) ?: throw IOException("Пустой ответ при обновлении")
         }
@@ -174,6 +174,9 @@ class HttpCalendarGateway(
         search: String?,
     ): String {
         val parts = mutableListOf<String>()
+        // Expand recurring events and order the bounded page by occurrence start time.
+        parts += "singleEvents=true"
+        parts += "orderBy=startTime"
         timeMin?.let { parts += "timeMin=${enc(CalendarTime.rfc3339(it))}" }
         timeMax?.let { parts += "timeMax=${enc(CalendarTime.rfc3339(it))}" }
         parts += "maxResults=$limit"

@@ -1,19 +1,64 @@
 # Текущее состояние проекта
 
-## Runtime: чтение событий подтверждено; следующий scope — даты/поиск/формат (2026-10-27)
+## Runtime: single UPDATE/DELETE приняты; нужен multi-turn session/batch scope (2026-10-27)
 
-- После optional-field fix два хода прошли HTTP 200/error=None → executor Ok →
-  tool_result=Ok. Пользователь подтвердил актуальный список событий. Capture остановлен,
-  stderr пуст. Базовый доступ к основному календарю работает.
-- Второй уточнённый запрос снова превратился в READ days=7 без query; был новый HTTP-запрос,
-  не повтор из кэша. Executor игнорирует date и формирует постоянный недельный заголовок.
-- Новые требования: хронологическая группировка по датам, жирные заголовки дат, события
-  под своей датой; поиск конкретного типа событий на завтра не должен возвращать неделю.
-- Диагностика UI: ChatScreen сейчас выводит plain Text, Markdown renderer отсутствует.
-  Одних **маркеров** недостаточно — нужен Compose AnnotatedString для заголовков дат.
-- Предлагаемый следующий scope: formatter + sorting/local dates/all-day; date/days bounds
-  для READ/SEARCH; planner priority latest message + пример SEARCH tomorrow days=1;
-  narrow bold-date rendering без зависимости. Реализация пока не начата.
+- Пользователь подтвердил работу одиночного resolver. Trace: UPDATE search/GET/confirm/
+  refetch/PATCH200/Ok; DELETE search/GET/confirm/refetch/DELETE204/Ok. Первоначальный 401
+  на read был штатно восстановлен authorized gateway, auth-правок не требуется.
+- Новые требования: сохранять найденный набор/текущую задачу между репликами до смены
+  темы; find+delete all matching; сбор CREATE/UPDATE недостающих полей за несколько реплик.
+- Факты trace: SEARCH30 → DELETE с новым query/source_date → candidates=none;
+  другая SEARCH days7 завершила ход без delete; CREATE с title/date, без time → Error,
+  следующая реплика стала DELETE → candidates=none. Тексты/значения редактированы.
+- Причины в коде: recentEvents — только список, нет draft/active intent/missing slots;
+  planner не получает typed session context; re-search имеет приоритет над recent set;
+  multi-write намеренно запрещён prompt, executor рассчитан на один target.
+- Предложить согласованный scope: app-side Calendar session state, draft slot filling,
+  use-context selection, bounded batch confirmation/results, week bounds/pagination.
+  Production code этого блока ещё не изменён, ожидается согласие на расширение архитектуры.
+  Capture остановлен, stderr пуст. Исходные фразы с содержимым событий не сохраняются.
+
+## UPDATE/DELETE: вариант 2 реализован, APK готов к ручной проверке (2026-10-27)
+
+- Пользователь одобрил app-side resolver, уточнив сценарий переноса завтрашнего события
+  с одного часа на другой. Личные названия/полные фразы в документы не сохраняются.
+- Контракт расширен source_date/source_time (исходная цель), date/time = новые значения
+  UPDATE; parser проверяет типы, известные поля и длины. Prompt сохраняет UPDATE/DELETE
+  вместо замены намерения на отдельный SEARCH.
+- Executor хранит последние API candidates в памяти; разрешает цель через search/day/last
+  results, не доверяет неизвестному model ID. Несколько совпадений → UI выбора; затем
+  свежий GET → подготовка → подтверждение реального события/old→new → повторный GET → запись.
+- Новый CalendarEventUpdate.kt сохраняет исходный день/длительность при time-only,
+  поддерживает перенос all-day по дате; PATCH передаёт только изменённые поля.
+- Выбор/подтверждение очищаются при отмене, context — при новом чате/смене подключения;
+  generation guards не дают использовать старые candidates после переподключения.
+- `.\gradlew.bat :app:assembleDebug` — SUCCESS (финально 1 с), `git diff --check` — успешно.
+  Unit/UI tests и lint не запускались. После отдельного разрешения пользователя
+  OnePlus обнаружен, install -r — Success, данные сохранены.
+- Следующий шаг — включить capture и сразу сообщить о готовности; затем ручной
+  тест переноса/выбора/отмены/удаления. Работоспособность новой записи пока не заявлять.
+  Batch writes, общий LLM tool loop и pagination этим блоком не реализованы.
+
+## Даты/поиск/формат установлены, ожидается ручная проверка (2026-10-27)
+
+- По прямому запросу создан baseline commit `2db2b9f`:
+  `fix(calendar): restore event access and trace tool requests` (10 файлов).
+  AGENTS.md, исходный prompt/review и calendar-auth.log оставлены вне коммита.
+- Новый одобренный блок пока НЕ закоммичен: группы по локальной дате, жирные date headings
+  через Compose AnnotatedString, хронология, время начала/конца и all-day без Instant.parse
+  для date-only. Убрано обрезание отображения до 10, группируется вся полученная страница.
+- READ/SEARCH применяют date/days, локальные полуночи и exclusive end; одна указанная дата
+  по умолчанию = 1 день, без даты/числа дней READ=7/SEARCH=30. Ошибочные даты → UI error.
+  API singleEvents/orderBy=startTime разворачивают повторения и сортируют страницу.
+- Planner: явный SEARCH для условия поиска/завтра, текущий запрос отделён от истории
+  в одном user turn. Реальное поведение модели после этих правок ещё не проверено.
+- `.\gradlew.bat :app:assembleDebug` — SUCCESS (3 с), `git diff --check` — успешно.
+  Unit/UI tests и lint не запускались. Есть существующий deprecated LocalLifecycleOwner warning.
+- После подключения OnePlus `adb devices -l` видит CPH2581; `install -r` — Success.
+  Следующий шаг — capture, сразу сообщить «можно проверять» и остановиться.
+  Runtime-проверка новых группировок и SEARCH на завтра ещё не выполнена.
+- Ограничения: API по-прежнему возвращает первую страницу до 25 событий; pagination,
+  multi-step model loop и batch writes этим блоком не реализованы.
 
 ## Optional-field fix готов к повторной проверке (2026-10-27)
 

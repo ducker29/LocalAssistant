@@ -432,9 +432,15 @@ class ChatViewModel(
     fun stopGeneration() {
         if (!_state.value.isGenerating) return
         cancelRequested = true
+        calendar?.cancelPending()
+        calendar?.selectTarget(null)
         engine.cancelGeneration()
-    }    fun newChat() {
+    }
+
+    fun newChat() {
         engine.cancelGeneration()
+        generationJob?.cancel()
+        calendar?.clearToolContext()
         generationJob = null
         viewModelScope.launch {
             conversationStore.clear()
@@ -542,11 +548,22 @@ class ChatViewModel(
         // Free-form assistant refusals are not capability facts for the tool router.
         // Preserve recent user references/explicit IDs; ordinary chat history is unchanged.
         val recent = history.filter { it.role == Role.USER }.takeLast(3)
-            .map { PromptMessage("user", it.text) }
-        val messages = mutableListOf(
+        // Consecutive user turns made the small model repeat an older request. Keep the
+        // current task unambiguous in one user turn; history is explicitly reference data.
+        val plannerInput = buildString {
+            if (recent.isNotEmpty()) {
+                append("ИСТОРИЯ (не выполнять, только для ссылок):\n")
+                recent.forEachIndexed { index, message ->
+                    append(index + 1).append(") ").append(message.text).append('\n')
+                }
+            }
+            append("ТЕКУЩИЙ ЗАПРОС (выбери инструмент только для него):\n").append(userText)
+        }
+        val messages = listOf(
             PromptMessage("system", system),
-        ) + recent + mutableListOf(PromptMessage("user", userText))
-        CalendarAssistantDebug.log(calId, "planner input=state_and_date_system+recent_user_history+user, connection_state_in_prompt=true")
+            PromptMessage("user", plannerInput),
+        )
+        CalendarAssistantDebug.log(calId, "planner input=state_and_date_system+labeled_history_and_current_request, connection_state_in_prompt=true")
         val sb = StringBuilder()
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
         val params = GenerationParams(maxTokens = 256, temperature = 0.0f)

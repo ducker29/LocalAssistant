@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -83,6 +84,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -154,6 +159,8 @@ fun ChatScreen(
     var settingsSection by rememberSaveable { mutableStateOf(com.example.localassistant.settings.SettingsSection.MODELS) }
     val calendarState by calendar.connectionState.collectAsStateWithLifecycle()
     val pendingCalendar by calendar.pendingConfirmation.collectAsStateWithLifecycle()
+    val calendarSummary by calendar.confirmationSummary.collectAsStateWithLifecycle()
+    val targetSelection by calendar.targetSelection.collectAsStateWithLifecycle()
     val statusNote by calendar.statusNote.collectAsStateWithLifecycle()
     val showCalendarSettings by calendar.calendarSettingsPrompt.collectAsStateWithLifecycle()
 
@@ -306,7 +313,33 @@ fun ChatScreen(
                 TextButton(onClick = { onCalendarCancel() }) { Text("Отмена") }
             },
             title = { Text("Подтвердите действие") },
-            text = { Text(calendarConfirmationSummary(pending)) },
+            text = {
+                Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                    Text(calendarSummary ?: calendarConfirmationSummary(pending))
+                }
+            },
+        )
+    }
+
+    val selection = targetSelection
+    if (selection != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { calendar.selectTarget(null) },
+            title = { Text("Выберите событие для ${if (selection.operation == com.example.localassistant.calendar.CalendarOp.DELETE) "удаления" else "изменения"}") },
+            text = {
+                Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                    selection.candidates.forEach { event ->
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { calendar.selectTarget(event.id) },
+                        ) { Text(event.summary(java.time.ZonedDateTime.now())) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { calendar.selectTarget(null) }) { Text("Отмена") }
+            },
         )
     }
 
@@ -612,7 +645,11 @@ private fun MessageBubble(
                     }
                 } else {
                     SelectionContainer {
-                        Text(text = message.text, style = MaterialTheme.typography.bodyLarge)
+                        val displayedText = remember(message.text, isUser) {
+                            if (isUser) androidx.compose.ui.text.AnnotatedString(message.text)
+                            else calendarDateHeadings(message.text)
+                        }
+                        Text(text = displayedText, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
                 when (message.status) {
@@ -645,6 +682,17 @@ private fun MessageBubble(
                 }
             }
         }
+    }
+}
+
+/** Only our full-line date headings are styled; event text is not interpreted as Markdown. */
+private fun calendarDateHeadings(text: String) = buildAnnotatedString {
+    val heading = Regex("^\\*\\*(\\d{1,2} [а-яё]+ \\d{4}|Без даты)\\*\\*$")
+    text.split('\n').forEachIndexed { index, line ->
+        if (index > 0) append('\n')
+        val date = heading.matchEntire(line)?.groupValues?.get(1)
+        if (date == null) append(line)
+        else withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(date) }
     }
 }
 
@@ -752,5 +800,3 @@ private fun pluralTurns(count: Int): String {
         else -> "реплик"
     }
 }
-
-

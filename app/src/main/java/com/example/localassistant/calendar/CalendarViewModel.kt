@@ -34,6 +34,11 @@ class CalendarViewModel(
     val connectionState: StateFlow<CalendarConnectionState> = authManager.state
 
     val pendingConfirmation: StateFlow<CalendarToolRequest?> = executor.pendingConfirmation
+    val confirmationSummary: StateFlow<String?> = executor.confirmationSummary
+    val targetSelection: StateFlow<CalendarTargetSelection?> = executor.targetSelection
+
+    fun selectTarget(id: String?) = executor.selectTarget(id)
+    fun clearToolContext() = executor.clearContext()
 
     private val _statusNote = MutableStateFlow<String?>(null)
     val statusNote: StateFlow<String?> = _statusNote.asStateFlow()
@@ -62,6 +67,7 @@ class CalendarViewModel(
             return
         }
         isAuthorizing = true
+        executor.clearContext()
         Log.i(TAG, "connect requested (account=present)")
         viewModelScope.launch {
             try {
@@ -143,6 +149,7 @@ class CalendarViewModel(
     }
 
     fun disconnect() {
+        executor.clearContext()
         activeConsent = null
         _pendingConsentIntent.value = null
         Log.i(TAG, "disconnect requested")
