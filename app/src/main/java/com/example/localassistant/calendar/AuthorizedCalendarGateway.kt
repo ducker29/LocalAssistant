@@ -1,6 +1,5 @@
 package com.example.localassistant.calendar
 
-import android.util.Log
 import java.time.ZonedDateTime
 
 /**
@@ -53,19 +52,21 @@ class AuthorizedCalendarGateway(
         call: suspend () -> Result<T>,
     ): Result<T> {
         val first = auth.ensureToken()
+        CalendarAssistantDebug.log("authorized gateway: authorization=${first::class.simpleName}")
         if (first !is TokenResult.Ok) {
             return Result.failure(CalendarAuthorizationRequiredException(messageOf(first)))
         }
 
         var result = call()
         if (result.isUnauthorized()) {
-            Log.i(TAG, "401 detected; invalidating token (idempotent=$idempotent)")
+            CalendarAssistantDebug.log("authorized gateway: error=Unauthorized, invalidate=true, idempotent=$idempotent")
             auth.invalidateRejectedToken(first.token)
             if (!idempotent) {
                 // Do not replay writes. The 401 means the request was rejected before execution.
                 return result
             }
             val second = auth.ensureToken()
+            CalendarAssistantDebug.log("authorized gateway: retry_authorization=${second::class.simpleName}")
             if (second !is TokenResult.Ok || second.token == first.token) {
                 return if (second is TokenResult.Ok) result else Result.failure(
                     CalendarAuthorizationRequiredException(messageOf(second))
@@ -89,7 +90,4 @@ class AuthorizedCalendarGateway(
         return error is CalendarApiException && error.error is CalendarApiError.Unauthorized
     }
 
-    private companion object {
-        const val TAG = "AuthorizedCalGateway"
-    }
 }

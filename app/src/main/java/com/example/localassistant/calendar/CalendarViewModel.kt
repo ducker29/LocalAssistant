@@ -163,7 +163,9 @@ class CalendarViewModel(
      * authorization never turns into an invented calendar answer.
      */
     suspend fun run(request: CalendarToolRequest): CalendarToolResult {
-        return when (val token = authManager.ensureToken()) {
+        val token = authManager.ensureToken()
+        CalendarAssistantDebug.log("facade authorization=${token::class.simpleName}, state=${connectionState.value::class.simpleName}")
+        return when (token) {
             is TokenResult.Ok -> {
                 _calendarSettingsPrompt.value = false
                 executor.executeSuspend(request)

@@ -11,6 +11,7 @@ import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
 import com.example.localassistant.llm.PromptMessage
 import com.example.localassistant.calendar.CalendarToolRequest
+import com.example.localassistant.calendar.CalendarAssistantDebug
 import com.example.localassistant.calendar.CalendarToolResult
 import com.example.localassistant.calendar.CalendarViewModel
 import com.example.localassistant.llm.ReasoningFilter
@@ -129,13 +130,13 @@ class ChatViewModel(
 
             // ---- Planner pass (optional, only when a calendar facade is attached) ----
             val calId = java.util.UUID.randomUUID().toString().take(8)
-            Log.i(TAG, "[$calId] planner path entered, userText='${text.take(80)}', calendarAttached=${calendar != null}")
+            CalendarAssistantDebug.log(calId, "planner entered: calendarAttached=${calendar != null}")
             val plannerOutcome = runPlanner(text, calId)
             if (plannerOutcome is PlannerOutcome.ToolCall) {
                 val req = plannerOutcome.request
-                Log.i(TAG, "[$calId] dispatching calendar tool: op=${req.op}, date=${req.date}, query=${req.query}")
-                val result = runCalendarTool(req)
-                Log.i(TAG, "[$calId] calendar tool result: ${result::class.simpleName}")
+                CalendarAssistantDebug.log(calId, "dispatch: ${CalendarAssistantDebug.parameters(req)}")
+                val result = runCalendarTool(req, calId)
+                CalendarAssistantDebug.log(calId, "final tool_result=${result::class.simpleName}, returned_to_model=false, destination=UI")
                 when (result) {
                     is CalendarToolResult.NeedConfirmation -> {
                         // Wait for the user to confirm/cancel; the gate lives in the executor.
@@ -176,6 +177,7 @@ class ChatViewModel(
                 }
             }
             // No tool call (or NONE): fall through to the normal streaming answer below.
+            CalendarAssistantDebug.log(calId, "tool_result=None, returned_to_model=false, destination=normal_chat")
 
             // Fit history into the window, reserving room for at least a minimal answer.
 
@@ -196,6 +198,7 @@ class ChatViewModel(
                 null
             }
             if (planned == null) {
+                CalendarAssistantDebug.log(calId, "final outcome=normal_chat_context_rejected, tool_result=None, returned_to_model=false")
                 finishMessage(
                     assistantId,
                     MessageStatus.FAILED,
@@ -283,6 +286,7 @@ class ChatViewModel(
                 }
             }
             finishMessage(assistantId, finalStatus, textOut)
+            CalendarAssistantDebug.log(calId, "final outcome=normal_chat, status=$finalStatus, tool_result=None, returned_to_model=false")
             _state.update { it.copy(isGenerating = false) }
             Log.i(
                 TAG,
@@ -499,40 +503,50 @@ class ChatViewModel(
     private suspend fun runPlanner(userText: String, calId: String): PlannerOutcome {
         val cal = calendar
         if (cal == null) {
-            Log.i(TAG, "[$calId] planner skipped: calendar facade not attached")
+            CalendarAssistantDebug.log(calId, "planner skipped: calendar_not_attached")
             return PlannerOutcome.None
         }
-        Log.i(TAG, "[$calId] planner start, connected=${cal.connectionState.value::class.simpleName}")
+        val connectionState = cal.connectionState.value
+        CalendarAssistantDebug.log(calId, "planner state=${connectionState::class.simpleName}, connection_state_in_prompt=true")
         val raw = try {
-            runPlannerGeneration(userText, calId)
+            runPlannerGeneration(userText, calId, connectionState)
         } catch (t: Throwable) {
-            Log.w(TAG, "[$calId] planner generation exception: ${t::class.simpleName}: ${t.message}")
+            CalendarAssistantDebug.log(calId, "planner failure category=${t::class.simpleName}")
             return PlannerOutcome.None
         }
-        Log.i(TAG, "[$calId] planner raw output (len=${raw.length}): '${raw.take(300)}'")
+        CalendarAssistantDebug.log(calId, "planner raw length=${raw.length}, redacted=${CalendarAssistantDebug.redactedRaw(raw)}")
         val parsed = com.example.localassistant.calendar.CalendarToolParser.parse(raw)
         return when (parsed) {
             is com.example.localassistant.calendar.CalendarToolParser.ParseOutcome.Ok -> {
-                Log.i(TAG, "[$calId] parser OK: op=${parsed.request.op}, date=${parsed.request.date}, query=${parsed.request.query}, days=${parsed.request.days}")
+                CalendarAssistantDebug.log(calId, "parser OK: ${CalendarAssistantDebug.parameters(parsed.request)}")
                 PlannerOutcome.ToolCall(parsed.request)
             }
             is com.example.localassistant.calendar.CalendarToolParser.ParseOutcome.ToolParseError -> {
-                Log.i(TAG, "[$calId] parser REJECTED: ${parsed.reason}")
+                CalendarAssistantDebug.log(calId, "parser REJECTED: reason=${CalendarAssistantDebug.rejection(parsed.reason)}")
                 PlannerOutcome.None
             }
         }
     }
 
     /** Single non-streaming generation; collects the full text. */
-    private suspend fun runPlannerGeneration(userText: String, calId: String): String {
-        val system = com.example.localassistant.calendar.CalendarToolSpec.PLANNER_SYSTEM_PROMPT
+    private suspend fun runPlannerGeneration(
+        userText: String,
+        calId: String,
+        connectionState: com.example.localassistant.calendar.CalendarConnectionState,
+    ): String {
+        val system = com.example.localassistant.calendar.CalendarToolSpec.plannerSystemPrompt(
+            connectionState,
+            java.time.ZonedDateTime.now(),
+        )
         val history = _state.value.messages.dropLast(2)
-        val turns = buildTurns(history)
-        val recent = turns.takeLast(3).flatten()
+        // Free-form assistant refusals are not capability facts for the tool router.
+        // Preserve recent user references/explicit IDs; ordinary chat history is unchanged.
+        val recent = history.filter { it.role == Role.USER }.takeLast(3)
+            .map { PromptMessage("user", it.text) }
         val messages = mutableListOf(
             PromptMessage("system", system),
         ) + recent + mutableListOf(PromptMessage("user", userText))
-        Log.i(TAG, "[$calId] planner prompt: system=${system.length}ch, history_msgs=${recent.size}, user='${userText.take(60)}'")
+        CalendarAssistantDebug.log(calId, "planner input=state_and_date_system+recent_user_history+user, connection_state_in_prompt=true")
         val sb = StringBuilder()
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
         val params = GenerationParams(maxTokens = 256, temperature = 0.0f)
@@ -540,16 +554,20 @@ class ChatViewModel(
             messages = messages,
             params = params,
             onChunk = { chunk -> sb.append(chunk) },
-            onDone = { done.complete(Unit) },
+            onDone = { result ->
+                CalendarAssistantDebug.log(calId, "planner generation termination=${result.termination}")
+                done.complete(Unit)
+            },
         )
         try { done.join() } catch (t: Throwable) { throw t }
-        Log.i(TAG, "[$calId] planner generation done: ${sb.length} chars")
         return sb.toString()
     }
 
-    private suspend fun runCalendarTool(request: CalendarToolRequest): CalendarToolResult {
+    private suspend fun runCalendarTool(request: CalendarToolRequest, calId: String): CalendarToolResult {
         val cal = calendar ?: return CalendarToolResult.Error("Календарь не настроен")
-        return cal.run(request)
+        return kotlinx.coroutines.withContext(CalendarAssistantDebug.Trace(calId)) {
+            cal.run(request)
+        }
     }
 
     /** Confirm the pending calendar write (from the UI dialog). */

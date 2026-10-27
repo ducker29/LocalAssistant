@@ -41,8 +41,8 @@ data class CalendarEvent(
                 start = start,
                 end = end,
                 allDay = allDay,
-                location = item.optString("location", null).takeIf { it.isNotBlank() },
-                description = item.optString("description", null).takeIf { it.isNotBlank() },
+                location = item.optString("location", "").takeIf { it.isNotBlank() },
+                description = item.optString("description", "").takeIf { it.isNotBlank() },
             )
         }
     }

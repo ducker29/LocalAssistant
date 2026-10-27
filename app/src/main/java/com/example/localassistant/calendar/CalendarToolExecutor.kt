@@ -1,6 +1,5 @@
 package com.example.localassistant.calendar
 
-import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.time.Duration
@@ -94,9 +93,9 @@ class CalendarToolExecutor(
     }
 
     suspend fun executeSuspend(request: CalendarToolRequest): CalendarToolResult {
-        Log.i(TAG, "executor: op=${request.op}, date=${request.date}, query=${request.query}, days=${request.days}, connected=${is_connected()}")
+        CalendarAssistantDebug.log("executor: op=${request.op}, connected=${is_connected()}")
         if (!is_connected()) {
-            Log.w(TAG, "executor: NOT CONNECTED — returning NotConnected")
+            CalendarAssistantDebug.log("executor result=NotConnected")
             return CalendarToolResult.NotConnected(
                 "Календарь не подключён. Открой настройки, чтобы войти в Google Календарь."
             )
@@ -106,15 +105,15 @@ class CalendarToolExecutor(
             CalendarOp.READ -> {
                 val min = now
                 val max = now.plusDays(7)
-                Log.i(TAG, "executor READ: listing ${min} .. ${max} (date field=${request.date} ignored)")
+                CalendarAssistantDebug.log("executor READ: gateway=listEvents, date_parameter_applied=false")
                 return when (val r = gateway.listEvents(min, max)) {
                     is Result<*> -> if (r.isSuccess) {
                         val events = r.getOrNull().orEmpty()
                         val text = formatList(events, "На этой неделе")
-                        Log.i(TAG, "executor READ: success, ${events.size} events")
+                        CalendarAssistantDebug.log("executor READ: result=Ok")
                         CalendarToolResult.Ok(text, events.toModelContext())
                     } else {
-                        Log.w(TAG, "executor READ: gateway failure: ${r.exceptionOrNull()?.message}")
+                        CalendarAssistantDebug.log("executor READ: result=gateway_failure")
                         mapFailure(r.exceptionOrNull(), isWrite = false)
                     }
                 }
@@ -125,15 +124,15 @@ class CalendarToolExecutor(
                 val min = now
                 val max = now.plusDays(days.toLong())
                 val query = request.query ?: ""
-                Log.i(TAG, "executor SEARCH: query='$query', ${min} .. ${max} (days=$days)")
+                CalendarAssistantDebug.log("executor SEARCH: gateway=searchEvents, days=$days, query=<redacted>")
                 return when (val r = gateway.searchEvents(query, min, max)) {
                     is Result<*> -> if (r.isSuccess) {
                         val events = r.getOrNull().orEmpty()
                         val text = formatList(events, "Найдено: ${events.size}")
-                        Log.i(TAG, "executor SEARCH: success, ${events.size} events")
+                        CalendarAssistantDebug.log("executor SEARCH: result=Ok")
                         CalendarToolResult.Ok(text, events.toModelContext())
                     } else {
-                        Log.w(TAG, "executor SEARCH: gateway failure: ${r.exceptionOrNull()?.message}")
+                        CalendarAssistantDebug.log("executor SEARCH: result=gateway_failure")
                         mapFailure(r.exceptionOrNull(), isWrite = false)
                     }
                 }
@@ -143,7 +142,9 @@ class CalendarToolExecutor(
                 val g = CalendarConfirmationGate()
                 gate = g
                 _pendingConfirmation.value = request
+                CalendarAssistantDebug.log("executor: outcome=awaiting_confirmation")
                 val confirmed = g.await()
+                CalendarAssistantDebug.log("executor: confirmation=$confirmed")
                 _pendingConfirmation.value = null
                 if (!confirmed) {
                     return CalendarToolResult.Error("Отменено пользователем")
@@ -344,7 +345,4 @@ class CalendarToolExecutor(
         if (value == null) now.toLocalDate()
         else CalendarTime.resolveDate(value, now)
 
-    companion object {
-        private const val TAG = "CalToolExec"
-    }
 }

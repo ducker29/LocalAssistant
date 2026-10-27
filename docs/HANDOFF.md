@@ -1,5 +1,209 @@
 # Передача контекста проекта
 
+## Последний успешный тест и новые требования (2026-10-27)
+
+Пользователь подтвердил актуальный ответ после optional-field fix. Два хода в trace:
+READ days=7 → HTTP 200/error=None → executor Ok → UI. Во втором ходе тоже READ days=7,
+query=null, date_parameter_applied=false; новый HTTP-запрос, не cache replay.
+Capture остановлен с проверкой PID/аргументов; stderr пуст. Чтение календаря подтверждено.
+
+Пользователь просит: (1) хронологические группы событий по датам, дата жирная,
+события под ней; (2) вопрос о конкретном типе событий на завтра должен учитывать
+условие и день, а не повторять недельный список. Личные названия/содержимое не сохраняем.
+
+Факты кода: CalendarToolExecutor.formatList — events.take(10), без сортировки/групп,
+READ всегда now..now+7 и header «На этой неделе», SEARCH тоже игнорирует date.
+Planner отдаёт READ вместо нужного SEARCH; нужны latest-message priority и пример
+SEARCH date=tomorrow days=1. Date/days должны применяться приложением, не только prompt.
+ChatScreen.MessageBubble — plain Text, поддержки Markdown нет. Для жирных date headings
+нужен narrow AnnotatedString renderer без новой зависимости/изменения сохранённых чатов.
+CalendarEvent formatter всегда Instant.parse; учесть all-day LocalDate для новых групп.
+
+Следующий предложенный scope ожидает согласия: форматтер/сортировка/группы + локальные
+границы date/days для READ/SEARCH + routing examples + date-heading rendering; без
+batch writes и общей multi-step архитектуры. Приёмка: недельный ответ по датам/времени,
+следующий SEARCH tomorrow даёт только выбранный день/условие или ясный пустой результат.
+После одобренной сборки/install/capture сразу сообщать «можно проверять» и ждать.
+
+## Последняя установленная версия: optional fields + exception stage (2026-10-27)
+
+Пользователь одобрил точечный fix после 200/ResponseOrRequestFailure.
+`CalendarEvent.kt`: `optString(location/description, "").takeIf { it.isNotBlank() }`
+вместо null fallback; отсутствие/пустота этих полей сохраняются как null в модели.
+`HttpCalendarGateway.kt`: фиксированный stage и имя exception class в трёх catch-логах,
+без message/stack/body/event text. Маппинг ошибок и all-day formatter пока не менялись.
+Финальный assembleDebug — SUCCESS (1 с), compile без новых предупреждений;
+OnePlus install -r — Success. Автотесты/lint не запускались.
+Следующая операция — capture CalendarAssistantDebug и немедленно сообщить «можно проверять».
+Затем ждать «готово», остановить именно capture-процесс и прочитать temp log.
+Пока не заявлять, что отсутствие optional fields было доказанной причиной: ожидаем runtime.
+
+## Последнее воспроизведение: API вернул 200, сломалась обработка (2026-10-27)
+
+Одобренный route fix выполнен в `HttpCalendarGateway.kt`: base `/calendar/v3`,
+GET list/search/get используют `/calendars/primary/events`, route templates согласованы.
+Сборка `.\gradlew.bat :app:assembleDebug` — SUCCESS (1 с); diff check успешен;
+OnePlus install -r — Success, данные не очищались. Автотесты/lint не запускались.
+Захват завершён после «готово» пользователя, stderr пуст.
+
+Факт runtime: READ days=7 → facade authorization=Ok → executor connected=true →
+GET `https://www.googleapis.com/calendar/v3/calendars/primary/events` → 200 →
+ResponseOrRequestFailure → tool_result=Error. UI «Нет сети» является неверным
+обобщением catch Exception в gateway, не доказательством отсутствия сети.
+
+Код проверен: `CalendarJson.parseEventList` вызывает `CalendarEvent.fromItem`, где
+`item.optString("location", null).takeIf { it.isNotBlank() }` и аналогично description
+могут вызвать NPE для отсутствующих optional fields. Это наиболее конкретный кандидат,
+но exception class/stack в безопасной трассировке пока не собраны.
+Также `CalendarEvent.formatInstant` всегда Instant.parse, в том числе для all-day date;
+это другой известный риск, пока не подтверждён этим логом (gateway уже падает до formatter).
+
+Следующий предложенный scope (ждать согласия): nullable-safe optional-field parsing в
+`CalendarEvent.kt`; safe error class/stage diagnostics в `HttpCalendarGateway.kt`
+без exception message, event text или response body. Затем assembleDebug, install -r,
+capture и сразу сообщить пользователю о готовности — после запуска capture не продолжать
+фоновую работу/документы до воспроизведения. Факт доступа есть, видимость списка ещё нет.
+Commit/push, массовая переработка Calendar и автотесты по-прежнему не разрешены.
+
+## Последняя проверка устройства: READ/SEARCH получили HTTP 404 (2026-10-27)
+
+Пользователь попросил сначала проверить базовое чтение календаря. Новая planner-сборка
+установлена на OnePlus через `install -r` — Success. Фильтр CalendarAssistantDebug
+запущен в temp вне репозитория; после двух запросов прочитан, stderr пуст, capture
+процесс остановлен после проверки PID/аргументов. Данные/события не изменялись.
+
+Оба хода подтверждают `connection_state_in_prompt=true`, EOG, parser OK (READ, SEARCH),
+authorization=Ok, executor connected=true, затем неверный GET `/calendar/v3/users/me/events`
+и HTTP 404/NotFound. UI «Событие не найдено» — отображение HTTP-ошибки, не пустой список.
+Первый READ date есть, executor date_parameter_applied=false; второй SEARCH date=null.
+Planner fix достиг цели маршрутизации, успех чтения пока не подтверждён.
+
+Следующий минимальный план (ожидает согласия): только `HttpCalendarGateway.kt`, исправить
+base на `https://www.googleapis.com/calendar/v3`, list/search на
+`/calendars/primary/events?...`, get на `/calendars/primary/events/{id}`;
+согласовать safe route templates в диагностике. Пути create/update/delete уже начинаются
+с `/calendars/...`; при новой базе не добавлять второй префикс. Не вызывать записи при
+проверке. Сборка assembleDebug, обновление через install -r и новый capture только в
+одобренном scope. Критерий — GET корректного endpoint, HTTP 200/error=None, tool_result=Ok
+и сопоставление списка пользователем. Не обещать корректность «завтра» этим fix.
+Автотесты по-прежнему не запускать без снятия ограничения. Commit/push не разрешены.
+
+## Актуальный блок: planner input исправлен (2026-10-27)
+
+Пользователь одобрил первый fix и потребовал учитывать все 5 операций из
+`CALENDAR_IMPLEMENT_PROMPT.md`, одиночные/множественные дни и события. Документ прочитан.
+Выполнен только ранее согласованный planner-блок, не полная переделка Calendar:
+- `CalendarToolSpec.kt`: dynamic state category (exhaustive when без payload), device-local
+  дата/время/zone, все 5 public→internal operation mappings, примеры READ/SEARCH/CREATE,
+  UPDATE/DELETE через поиск при неизвестном ID, запрет выдумывать значения и выбирать
+  произвольное событие. Множественная запись пока ведёт на уточнение, а не batch execution.
+- `ChatViewModel.kt`: один snapshot state передаётся в prompt и trace; только последние
+  3 user-сообщения вместо свободных assistant-ответов. Основная chat history сохранена.
+- Логи первого диагностического воспроизведения остаются baseline старой сборки;
+  новый planner должен логировать `connection_state_in_prompt=true`.
+
+Проверено: `.\gradlew.bat :app:assembleDebug` — успешно, 2 с; `git diff --check` — успешно.
+Автотесты не запускались согласно текущему ограничению; lint не запускался.
+APK прежний путь, файл обновлён сборкой: `app/build/outputs/apk/debug/app-debug.apk`.
+Эта версия на устройство ещё не установлена, runtime-успех не заявлять.
+
+Необходимый следующий scope для согласования: schema/parser для диапазона и нескольких
+операций при сохранении 5 типов команд; app-side строгая валидация дат/обязательных полей
+и известных event IDs; executor с local-day boundaries, поиском/выбором кандидатов,
+подтверждением конкретных действий и без silent batch writes; bounded multi-step loop
+с structured tool results для модели, без повторного выполнения записей; исправление
+подтверждённых HTTP route проблем. Учесть pagination/явное ограничение результатов.
+Сейчас READ не применяет date, SEARCH требует query и не применяет date,
+CREATE может подставлять default time/duration; prompt эти дефекты не исправляет.
+Обсудить focused unit tests для этого расширенного блока: ранее пользователь запретил
+автоматический запуск тестов. Установка/повторный захват — только в согласованном scope.
+
+## Последний runtime checkpoint (2026-10-27)
+
+После диагностической сборки пользователь явно разрешил обновление приложения и захват
+логов на OnePlus CPH2581. `adb` отсутствует в PATH; использован SDK
+`%LOCALAPPDATA%/Android/Sdk/platform-tools/adb.exe`. `install -r` — Success.
+Захват только `CalendarAssistantDebug:I *:S`, без очистки logcat; после «готово»
+процесс захвата остановлен (PID проверен по имени и аргументам). stderr пуст.
+Данные приложения не очищались, commit/push не выполнялись.
+
+Результат одного хода: Connected → EOG → raw `{"tool":"NONE"}` (15 символов) →
+unsupported_NONE → normal_chat COMPLETE. Вызова CalendarToolExecutor и HTTP не было.
+Подтверждена неверная маршрутизация planner, а не поломка JSON/ошибка Google API.
+Почему модель выбрала NONE (state отсутствует в prompt, влияние history и др.) — ещё гипотезы.
+
+Минимальный план для согласования: изменить только planner prompt/input
+(`CalendarToolSpec.kt`, `ChatViewModel.kt`): безопасный connection state без email,
+явное правило READ для запросов просмотра расписания и короткие примеры; исключить
+прежние свободные assistant-ответы об отсутствии доступа из planner input, сохранив
+обычную историю чата и данные для разрешения ссылок на события при необходимости.
+Никаких исправлений пока не внесено. Критерий первого блока — parser OK op=READ,
+executor и HTTP достигнуты; это ещё не приёмка правильного ответа за завтра.
+После одобрения отдельно согласовать проверки/повторное обновление устройства.
+Endpoint, обработка date и возврат tool result модели остаются отдельными вопросами.
+
+## Актуальная контрольная точка: Calendar diagnostics (2026-10-27)
+
+Пользователь сообщил, что подключение Google-аккаунта работает, но ассистент отказывает
+в чтении календаря. Прочитан `docs/CALENDAR_CHAIN_REVIEW.md`, выводы сверены с кодом.
+Текущая задача — только диагностика; исправлений бизнес-логики не согласовано.
+
+Изменения в `app/src/main/java/com/example/localassistant/`:
+- Новый `calendar/CalendarAssistantDebug.kt`: debug-only logger, coroutine-local ID,
+  fail-closed маскирование raw (сохраняются синтаксис и словарь схемы), безопасные
+  параметры и фиксированные категории parser rejection.
+- `chat/ChatViewModel.kt`: заменены небезопасные логи текста запроса/raw/параметров;
+  state/input shape, termination, parser, dispatch, final result, returned_to_model=false.
+- `calendar/CalendarViewModel.kt`: категория результата ensureToken и state без payload.
+- `calendar/CalendarToolExecutor.kt`: connected, ветка READ/SEARCH, подтверждение записи;
+  вместо query/date/exception message — безопасные категории.
+- `calendar/AuthorizedCalendarGateway.kt`: результат авторизации, 401/retry без токенов.
+- `calendar/HttpCalendarGateway.kt`: method, route template без query/ID, status/error;
+  удалены логи exception/error messages. Тела и заголовки не логируются.
+
+Поведение сохранено: статический planner prompt без connection state, строгий JSONObject,
+NONE отклоняется, fallback в normal chat, READ использует 7 дней и игнорирует date,
+tool result становится UI-ответом без второго вызова модели. Эти наблюдения не являются
+доказанной runtime-причиной отказа. Утверждение review о корректности endpoint не
+подтверждено: фактический GET `/calendar/v3/users/me/events` требует проверки по HTTP-логу.
+
+Проверки: `:app:tasks --all` — задача существует; `git diff --check` — успешно;
+`.\gradlew.bat :app:assembleDebug` — BUILD SUCCESSFUL, 4 с. Имеется warning об уже
+существующем deprecated `TRIM_MEMORY_RUNNING_LOW`. Unit/UI tests не запускались по
+прямому ограничению пользователя; lint не запускался (согласован только assembleDebug).
+APK: `E:\Programs\Android\AndroidStudioProjects\LocalAssistant\app\build\outputs\apk\debug\app-debug.apk`.
+Установка, подключение/проверка устройства, adb, commit/push не выполнялись.
+
+Следующая операция — только со стороны пользователя: установить APK с сохранением данных,
+убедиться в подключении аккаунта, запустить захват логов и отправить один запрос:
+«Что у меня завтра в календаре?». Дождаться итогового ответа и остановить захват Ctrl+C.
+Команда ниже предназначена пользователю и агентом НЕ выполнялась:
+```powershell
+adb logcat -v threadtime 'CalendarAssistantDebug:I' '*:S'
+```
+Android Studio Logcat: `package:com.example.localassistant tag:CalendarAssistantDebug`.
+Не очищать историю/данные/логи, не отключать аккаунт ради этого сценария.
+
+Как читать логи с одним `[ID]`:
+- `planner state=Connected, connection_state_in_prompt=false` — state доступен приложению,
+  но не добавлен в planner prompt; это не подтверждение валидности токена.
+- `planner raw length=...` — реальная длина и маскированная структура ответа.
+- `parser REJECTED: reason=not_json_object|unsupported_NONE|missing_tool|unknown_operation|days_out_of_range`
+  — причина fallback; executor/HTTP для этого ID не ожидаются.
+- `parser OK: op=READ, ...` → `facade authorization=Ok` → `executor: op=READ, connected=true`
+  — пройдены парсинг и локальные проверки доступа.
+- `authorized gateway: authorization=Ok` → `HTTP method=GET, endpoint=..., status=...`
+  — достигнут HTTP gateway; `error=None` означает также успешный разбор тела ответа.
+- `error=Unauthorized|Forbidden|Configuration|NotFound|RateLimited|Server|Network|ResponseOrRequestFailure`
+  — безопасная категория; 401 дополнительно виден как invalidate/retry_authorization.
+- `final tool_result=Ok|Error|NotConnected, returned_to_model=false, destination=UI`
+  — итог tool и отсутствие передачи его модели в этом ходе.
+- `destination=normal_chat` → `final outcome=normal_chat, status=...` — сработал fallback.
+
+После получения логов сначала предложить минимальный fix plan; реализация только после
+согласования. Исходные пользовательские изменения `AGENTS.md`, незарегистрированные
+review/prompt/log-файлы сохранены; `calendar-auth.log` не читался и не изменялся.
+
 ## Состояние на 2026-10-27 — явная проверка Google-аккаунта (ждёт ручной проверки)
 
 Где остановились: исправлено «бесконечное Checking». Две причины, обе устранены:

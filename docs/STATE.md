@@ -1,5 +1,116 @@
 # Текущее состояние проекта
 
+## Runtime: чтение событий подтверждено; следующий scope — даты/поиск/формат (2026-10-27)
+
+- После optional-field fix два хода прошли HTTP 200/error=None → executor Ok →
+  tool_result=Ok. Пользователь подтвердил актуальный список событий. Capture остановлен,
+  stderr пуст. Базовый доступ к основному календарю работает.
+- Второй уточнённый запрос снова превратился в READ days=7 без query; был новый HTTP-запрос,
+  не повтор из кэша. Executor игнорирует date и формирует постоянный недельный заголовок.
+- Новые требования: хронологическая группировка по датам, жирные заголовки дат, события
+  под своей датой; поиск конкретного типа событий на завтра не должен возвращать неделю.
+- Диагностика UI: ChatScreen сейчас выводит plain Text, Markdown renderer отсутствует.
+  Одних **маркеров** недостаточно — нужен Compose AnnotatedString для заголовков дат.
+- Предлагаемый следующий scope: formatter + sorting/local dates/all-day; date/days bounds
+  для READ/SEARCH; planner priority latest message + пример SEARCH tomorrow days=1;
+  narrow bold-date rendering без зависимости. Реализация пока не начата.
+
+## Optional-field fix готов к повторной проверке (2026-10-27)
+
+- По согласованию в `CalendarEvent.kt` location/description читаются с fallback `""`,
+  blank преобразуется в null; null больше не передаётся в optString и isNotBlank.
+- `HttpCalendarGateway.kt`: исключения логируют только class и фиксированный stage
+  (connect/write_request/response_status/read_response/parse_response/map_api_error).
+  Сообщения исключений и данные ответов в трассировку не добавлялись.
+- `.\gradlew.bat :app:assembleDebug` — успешно (1 с), финальная компиляция без новых
+  предупреждений; OnePlus `install -r` — Success. Автотесты/lint не запускались.
+- Далее запустить capture и сразу остановиться для пользовательского воспроизведения.
+  HTTP 200 был подтверждён предыдущим запуском; успешный вывод событий ещё не проверен.
+
+## Runtime: endpoint исправлен, HTTP 200, ошибка обработки ответа (2026-10-27)
+
+- Пользователь одобрил точечный route fix. `HttpCalendarGateway.kt`: base до
+  `/calendar/v3`, list/search/get под `/calendars/primary/events`, согласованы safe logs.
+  `.\gradlew.bat :app:assembleDebug` — успешно (1 с), `git diff --check` — успешно;
+  OnePlus `install -r` — Success. Автотесты/lint не запускались.
+- После запуска capture пользователь проверил READ: parser OK → authorization Ok →
+  правильный GET → HTTP 200 → error=ResponseOrRequestFailure → UI «Нет сети».
+  Значит HTTP-доступ работает; успешный разбор событий ещё не подтверждён.
+- Capture остановлен после проверки PID/аргументов, stderr пуст. Пользователь требует:
+  как только установка/capture готовы — сразу остановиться и сообщить «можно проверять».
+- Вероятный дефект по коду: CalendarEvent.fromItem вызывает isNotBlank на потенциально
+  null от optString для необязательных location/description. Точный класс исключения
+  текущая трассировка не показывает; all-day форматирование также требует отдельной проверки.
+- Следующий минимальный план (ещё не реализован): nullable-safe разбор этих двух полей
+  и диагностика класса/этапа исключения без message/payload. Получить согласие до правки.
+
+## Runtime: planner исправлен, обнаружен неверный API route (2026-10-27)
+
+- По разрешению пользователя новая сборка установлена на OnePlus через `install -r`
+  (Success); запущен и после воспроизведения остановлен фильтр CalendarAssistantDebug.
+- Два хода: parser OK READ и SEARCH → facade authorization=Ok → executor connected=true
+  → GET `https://www.googleapis.com/calendar/v3/users/me/events` → HTTP 404/NotFound
+  → tool_result=Error → UI. Наличие/отсутствие событий этими ответами не установлено.
+- Planner теперь реально вызывает инструменты; подтверждённый следующий блокер — route.
+  По API events.list нужен `/calendar/v3/calendars/{calendarId}/events`, primary допустим.
+- Предложен минимальный fix только `HttpCalendarGateway.kt`: base URL до `/calendar/v3`,
+  list/search/get под `/calendars/primary/events`; существующие пути записи используют
+  `/calendars/...` и станут согласованными с base. Пока fix не внесён, ожидается согласие.
+- «Завтра» ещё не поддержано корректно executor; во втором ходе SEARCH date=null.
+  Сначала подтвердить чтение календаря, затем отдельный блок date-range/batch/model loop.
+
+## Planner fix, первый согласованный блок (2026-10-27)
+
+- Изменены `CalendarToolSpec.kt`, `ChatViewModel.kt`: planner получает категорию state
+  без email/сообщений ошибок, текущую дату/время/zone устройства; правила охватывают
+  READ/CREATE/UPDATE/DELETE/SEARCH. Для изменения/удаления без ID сначала READ/SEARCH.
+- Из planner input исключены свободные assistant-ответы; последние три user-сообщения
+  сохранены. Обычная история чата не менялась. Диагностика теперь показывает
+  `connection_state_in_prompt=true`. Prompt не заменяет валидацию в приложении.
+- Уточнено требование пользователя: все пять команд из `CALENDAR_IMPLEMENT_PROMPT.md`,
+  один день/диапазоны и одно/несколько событий. Полное выполнение НЕ реализовано этим блоком:
+  нет date-range/batch контракта и multi-step tool loop, READ пока игнорирует date,
+  app-side проверка записи недостаточна. Множественная запись не должна сводиться
+  к одному событию; пока prompt направляет её на уточнение, это не batch-поддержка.
+- `.\gradlew.bat :app:assembleDebug` — BUILD SUCCESSFUL (2 с); `git diff --check` — успешно.
+  Автотесты/lint не запускались; новая сборка на устройство не устанавливалась.
+- Следующий шаг: согласовать расширенный Calendar-блок: валидируемые диапазоны/пакеты,
+  идентификация целей, подтверждение каждого действия, structured tool results/model loop,
+  endpoint и корректные границы периода. Успех новой маршрутизации на устройстве не проверен.
+
+## Runtime checkpoint после воспроизведения (2026-10-27)
+
+- Пользователь отдельно разрешил обновить приложение и захватить логи на OnePlus CPH2581.
+  `adb -s <selected-device> install -r .../app-debug.apk` — Success, без очистки данных.
+- Фильтр `CalendarAssistantDebug:I *:S` захвачен в локальный temp-файл вне репозитория.
+  После воспроизведения соответствующий процесс logcat остановлен; stderr пуст.
+- Подтверждено одним ходом: state=Connected → planner termination=EOG →
+  `{"tool":"NONE"}` → parser unsupported_NONE → normal_chat COMPLETE.
+  Executor/HTTP не достигнуты. Это ошибка выбора инструмента; повреждённый JSON,
+  авторизация и HTTP-ошибка не объясняют именно этот ход. Валидность API-доступа ещё не проверена.
+- Следующий шаг: согласовать минимальный первый fix — актуальный connection state
+  и явные READ-примеры в planner prompt, исключение влияния прежних свободных ответов
+  об отсутствии доступа на planner. Реализация пока не начата. Проверка: READ → HTTP;
+  окончательный ответ и date-range потребуют отдельной оценки по следующим логам.
+
+## Текущая задача: временная диагностика Calendar chain (2026-10-27)
+
+- По запросу пользователя добавлена только debug-трассировка `CalendarAssistantDebug`:
+  planner state/input shape → redacted raw + length → parser → facade authorization →
+  executor → authorized gateway → HTTP method/route/status/error → final result.
+- Один случайный ID проходит через coroutine context, включая `Dispatchers.IO`.
+  Произвольные строки planner/параметров скрыты; токены, email, заголовки,
+  содержимое событий, тела ответов и сообщения исключений в эту трассировку не попадают.
+- Бизнес-логика, промпты, парсер, авторизация, endpoint и зависимости не исправлялись.
+  Подтверждено кодом: state не передаётся planner; tool result не возвращается модели;
+  READ игнорирует date. Корректность `/calendar/v3/users/me/events` из review не доказана.
+- `:app:tasks --all` и `.\gradlew.bat :app:assembleDebug` — успешно; сборка 4 с.
+  Unit/UI tests и lint не запускались в рамках согласованной диагностической сборки.
+  Устройства не проверялись; adb, установка APK, commit/push не выполнялись.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`.
+- Следующий шаг: пользователь воспроизводит запрос и возвращает логи по тегу;
+  затем предложить минимальный план исправления, получить согласие до реализации.
+
 ## Календарь: явная проверка по кнопке (2026-10-27) — собрано, ждёт ручной проверки на телефоне
 
 Убраны две причины «бесконечной проверки»:

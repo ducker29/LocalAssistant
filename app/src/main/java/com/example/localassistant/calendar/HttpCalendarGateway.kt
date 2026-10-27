@@ -1,6 +1,5 @@
 package com.example.localassistant.calendar
 
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -26,7 +25,7 @@ class HttpCalendarGateway(
         limit: Int,
     ): Result<List<CalendarEvent>> {
         val query = buildListQuery(timeMin, timeMax, limit, search = null)
-        return request("GET", "/events?$query", null) { CalendarJson.parseEventList(it) }
+        return request("GET", "/calendars/primary/events?$query", null) { CalendarJson.parseEventList(it) }
     }
 
     override suspend fun searchEvents(
@@ -37,11 +36,11 @@ class HttpCalendarGateway(
     ): Result<List<CalendarEvent>> {
         val search = URLEncoder.encode(query, "UTF-8")
         val q = buildListQuery(timeMin, timeMax, limit, search = search)
-        return request("GET", "/events?$q", null) { CalendarJson.parseEventList(it) }
+        return request("GET", "/calendars/primary/events?$q", null) { CalendarJson.parseEventList(it) }
     }
 
     override suspend fun getEvent(id: String): Result<CalendarEvent?> =
-        request("GET", "/events/${enc(id)}", null) { body ->
+        request("GET", "/calendars/primary/events/${enc(id)}", null) { body ->
             CalendarJson.parseEvent(body)
         }
 
@@ -69,13 +68,22 @@ class HttpCalendarGateway(
         body: String?,
         parse: (String) -> T,
     ): Result<T> = withContext(Dispatchers.IO) {
-        Log.i(TAG, "gateway: $method ${path.take(80)}")
+        // Log only route templates: query strings and event/calendar IDs may contain private data.
+        val route = when {
+            path.startsWith("/calendars/primary/events/") -> "/calendars/primary/events/{event_id}"
+            path.startsWith("/calendars/primary/events") -> "/calendars/primary/events"
+            else -> "/calendars/{calendar_id}/events"
+        }
+        val endpoint = "$DEFAULT_BASE_URL$route"
+        CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=not_sent")
         val token = tokenProvider()
         if (token.isNullOrBlank()) {
-            Log.w(TAG, "gateway: NO TOKEN — failing")
+            CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=not_sent, error=NotConnected")
             return@withContext Result.failure(IllegalStateException("Календарь не подключён"))
         }
         var connection: HttpURLConnection? = null
+        var status: Int? = null
+        var stage = "connect"
         try {
             val url = URL(baseUrl + path)
             connection = url.openConnection() as HttpURLConnection
@@ -85,28 +93,37 @@ class HttpCalendarGateway(
             connection.setRequestProperty("Authorization", "Bearer $token")
             connection.setRequestProperty("Accept", "application/json")
             if (body != null) {
+                stage = "write_request"
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             }
+            stage = "response_status"
             val code = connection.responseCode
+            status = code
+            CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$code")
+            stage = "read_response"
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val responseBody = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-            Log.i(TAG, "gateway: HTTP $code, body_len=${responseBody.length}")
             if (code in 200..299) {
-                Result.success(parse(responseBody))
+                stage = "parse_response"
+                val parsed = parse(responseBody)
+                CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$code, error=None")
+                Result.success(parsed)
             } else {
+                stage = "map_api_error"
                 val err = mapError(code, responseBody)
-                Log.w(TAG, "gateway: error $code -> ${err::class.simpleName}: ${err.message}")
+                CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$code, error=${err::class.simpleName}")
                 Result.failure(CalendarApiException(err))
             }
         } catch (t: CalendarApiException) {
+            CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$status, error=${t.error::class.simpleName}, stage=$stage, exception=${t::class.simpleName}")
             Result.failure(t)
         } catch (t: IOException) {
-            Log.w(TAG, "gateway: IOException: ${t.message}")
+            CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$status, error=Network, stage=$stage, exception=${t::class.simpleName}")
             Result.failure(CalendarApiException(CalendarApiError.Network(t.message)))
         } catch (t: Exception) {
-            Log.w(TAG, "gateway: Exception: ${t::class.simpleName}: ${t.message}")
+            CalendarAssistantDebug.log("HTTP method=$method, endpoint=$endpoint, status=$status, error=ResponseOrRequestFailure, stage=$stage, exception=${t::class.simpleName}")
             Result.failure(CalendarApiException(CalendarApiError.Network(t.message ?: "Ошибка запроса")))
         } finally {
             connection?.disconnect()
@@ -167,9 +184,8 @@ class HttpCalendarGateway(
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     companion object {
-        private const val TAG = "CalGateway"
         const val DEFAULT_BASE_URL =
-            "https://www.googleapis.com/calendar/v3/users/me"
+            "https://www.googleapis.com/calendar/v3"
         const val TIMEOUT_MS = 20_000
     }
 }
