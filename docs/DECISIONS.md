@@ -279,6 +279,227 @@ Empty read может продолжать query; write требует реал�
 Сборка установлена install -r, последний ручной набор принят пользователем; это не полный
 автоматический regression PASS. Scopes этой правкой не менялись, data не мигрировались.
 
+## D024 — Лобби и границы первой библиотеки документов (2026-11-02)
+
+Статус: одобрено пользователем; UI собран, установлен и принят пользователем.
+Решение: перед текущим чатом добавить лобби с двумя режимами «Чат»/«Хранилище».
+Первый блок — навигация и пустая библиотека; затем отдельно импорт и поиск.
+DOCX/XLSX, десятки документов/сотни строк. Начальный embedding-кандидат —
+multilingual-e5-small, runtime/артефакт предстоит проверить. PDF/OCR отложены.
+Расчёты XLSX выполняет приложение по проверенным параметрам, не арифметика LLM.
+UI использует существующий Compose без новых зависимостей; Activity-scoped ViewModel
+сохраняют чат, rememberSaveable/SaveableStateHolder — экран и локальное UI state.
+При выходе из чата — stop generation/hold recording/cancel transcription.
+Проверка: assembleDebug/diff check PASS; после переустановки актуального APK пользователь
+подтвердил «теперь правки работают». Это не автоматическая регрессия всех lifecycle-сценариев.
+
+## D025 — Локальный OOXML import и структурированный preview (2026-11-02)
+
+Статус: реализация одобрена; сборка и targeted parser tests PASS, device-приёмка впереди.
+Решение: DOCX/XLSX читать встроенными ZIP/SAX API без дополнительных библиотек;
+SAF OpenMultipleDocuments, приватная копия оригинала, SHA-256 dedup, per-document
+AtomicFile metadata/content JSON. Для согласованного малого архива Room пока не нужен.
+Альтернатива: общий тяжёлый Office SDK — больше зависимостей ради ограниченного извлечения.
+DOCX: основной текст/таблицы в порядке, картинки/объекты игнорируются; без колонтитулов,
+комментариев/сносок и воспроизведения полной вёрстки/автонумерации.
+XLSX: листы/строки/координаты/типы/raw values/формулы/кэш; стиль используется для даты,
+система1900/1904 сохраняется. Полного format engine и formula evaluation нет; shared
+formulas без текста обозначены, не реконструируются. Скрытые листы/строки включены,
+merged cells представлены исходным значением. Preview — листы и страницы по 50 блоков.
+Ошибки по файлам, прерывание процесса → ERROR и повторный импорт. Лимиты: файл50МБ,
+XML64МБ/text4млн/100тыс непустых или формульных ячеек; пустое оформление не учитывается.
+Запрет DTD/внешних сущностей, media/embedded не открываются; XML byte budget ограничен.
+Примеры не в Git: /doc_examples/. Их текст/значения не логируются и не сохраняются в docs.
+Проверка: assembleDebug + только OfficeDocumentExtractorTest разрешены отдельно: PASS,
+6 tests включая 4 примера, без skips. Исправлен FAIL на 283180 XML cell records за счёт
+подсчёта лишь непустых/формульных ячеек. Lint/остальные tests/device не запускались.
+Следующий шаг: ручной импорт и проверка persistence, затем отдельно embeddings/RAG/аналитика.
+
+## D026 — Кандидат embedding artifact и проверка существующего runtime (2026-11-02)
+
+Статус: скачивание и host-проверка разрешены; интеграция ожидает проверки reference parity.
+Для multilingual-e5-small предлагается сначала GGUF Q8_0 через существующий llama.cpp,
+без новых Gradle dependencies и обновления vendored runtime. Кандидат/хеш/источники:
+EMBEDDING_RESEARCH.md. Он сторонний, не официальный GGUF intfloat; заявления автора
+конверсии не считать результатами проекта. Подтвердить tokenizer/mean/L2/384 dims/русский
+retrieval до индексации. Альтернатива при несовместимости — иной runtime, только после
+отдельного выбора и согласования. Веса скачаны вне Git, hash/size PASS; native host smoke PASS
+(384 finite/unit norm,3 Russian top1). App/vendor не менялись; device не проверялся.
+GGUF context511 и MASK ID→заглушка требуют reference/boundary checks. Следующая остановка —
+host-only tokenizers dependency и официальный tokenizer.json разрешены и получены.
+Reference parity16/24 FAIL: trailing whitespace и literal special markers требуют
+одинаковой input policy. Остановка перед JNI; не считать весовую конверсию ошибочной
+только по различию parse_special=false и reference AddedTokens. После согласованной подготовки
+search input normalized parity24/24 PASS. Новый стоп: actual position tensor511 и XLMRoberta
+converter offset при настоящем BertModel; требуется сравнение с official positional weights.
+HTTP Range отдельно разрешён/выполнен:808896 bytes, побайтово подтверждено удаление строки0
+(GGUF == official rows1..511 целиком). Metadata-only fix не применять.
+Предложено, пока НЕ принято: сохранить исходный файл и создать corrected copy с official
+positional tensor512x384/context512, byte-identical остальными tensors; проверить новый hash,
+integrity/tokenization/retrieval/boundary. Это меньше deps/downloads, чем полная конверсия.
+Подробности — research doc. До решения JNI-интеграция остановлена.
+
+## D027 — Локальный posfix артефакт вместо сдвинутого стороннего GGUF (2026-11-02)
+
+Статус: исправление и host-проверки одобрены и выполнены; Android-интеграция впереди.
+Причина: Range comparison подтвердил, что сторонний GGUF хранит official positional rows1..511
+вместо0..511. Metadata-only change не исправляет весовой сдвиг.
+Решение: сохранить исходный artifact и создать отдельную reproducible copy через
+tools/embedding/repair_e5_positions.py, full official F32 positional table512x384/context512,
+пересчитать descriptors/offsets. Остальные196 tensors и tokenizer metadata не менять.
+Inputs строго pinned hashes, existing outputs не перезаписывать. Output SHA256:
+bdb785b2ca8532ff3097f93ac3e4e1d560a122cfba377bf559895aebfd9be6d9; size132440544.
+Альтернатива — полная конверсия official checkpoint с дополнительными downloads/deps.
+Проверки: integrity PASS, prepared tokenizer24/24, Russian retrieval3/3, repeated inputs,
+inference510/511/512 tokens и513 preflight rejection PASS на host pinned llama.cpp.
+Границы: не полная numerical parity/не device-проверка; на Android guard ещё не реализован.
+Все веса/fixtures/reports остаются в ignored models; app/vendor/версии не менялись.
+
+## D028 — Отдельный embedding runtime в существующей native библиотеке (2026-11-02)
+
+Статус: реализация и focused проверки одобрены и выполнены; device integration впереди.
+Решение: EmbeddingContext отделён от Qwen handle, current pinned llama.cpp/общий init once,
+без новой зависимости/обновлений runtime. MEAN/noncausal384, L2, total token budget512.
+JNI принимает standard UTF8 ByteArray, не Modified UTF8; registry shared_ptr + mutex/atomic
+защищает lifetime и cancel/destroy. Native core не зависит от Android/JNI и проверяется на host.
+Kotlin E5EmbeddingEngine принимает только pinned posfix hash/size, готовит query/passage input,
+выполняет всё на одном worker, сериализует Mutex. CancellableContinuation сигналит native,
+но finished.await в NonCancellable удерживает operation ownership до завершения работы.
+Aborted context выгружается; повторное использование требует load. Close идемпотентный,
+не освобождает общий process backend и не затрагивает Qwen. Состояния через StateFlow.
+Альтернатива: переиспользовать Qwen context — конфликт lifecycle/моделей; не выбрана.
+Проверки: assembleDebug arm64-v8a/x86_64 PASS,6 E5EmbeddingEngineTest PASS (fake bridge),
+production native-core host probe PASS (ranking,384/unit,repeat,boundaries,cancel/reload).
+Android JNI runtime пока не вызывался. Engine не создан в UI/AppContainer, import весов,
+index/search и device ресурсы — следующие блоки. Новых dependencies/permissions нет.
+
+## D029 — Малый локальный документный индекс и ограниченная XLSX-аналитика (2026-11-02)
+
+Статус: все оставшиеся этапы разрешены, код добавлен; верификация заблокирована реальным
+subtotal Unicode-case bug (15/16 tests PASS), до исправления не считать готовым.
+Решение: per-doc AtomicFile binary vector snapshots, модель/формат версии pinned, exact scan
+для малого архива и BM25+cosine RRF. App-scoped embedding import/lifecycle в существующем
+AppContainer, private files, никакого cloud inference/new dependency или upgrades.
+Qwen — отдельные bounded messages без Calendar tools, checked source IDs/not-found;
+XLSX — allowlisted JSON plan, validated columns/ranges/filters, BigDecimal в приложении,
+unique-key comparison, formula cached results только по явному UI setting.
+Alternative DB/vector runtime отложены до доказанной потребности объёма; arbitrary SQL/code
+не исполняются. Индексация atomic/cancellable, valid index reuse; archive cap25k chunks.
+Проверки: compile PASS, parser6/6 с4fixtures и pipeline9/10. Ошибка «Итого» не скрывается;
+исправление/повторная команда затем разрешены пользователем. Только regex flag заменён на
+RegexOption.IGNORE_CASE (Unicode), без изменения теста. Финальный assembleDebug/16 targeted
+tests/lintDebug PASS19с. Device/real Qwen ещё не проверены, APK и веса не устанавливались.
+
+## D030 — Встроенный posfix GGUF и подготовка приватной копии (2026-11-02)
+
+Статус: включение весов в APK, fix и проверки явно одобрены; build/tests/lint/ZIP PASS,
+Android extraction/reuse ещё не проверены. Подробности: BUNDLED_EMBEDDING.md.
+Решение: генерируемый asset из ignored models/ с pinned hash/size при сборке,
+не хранить binary duplicate в src/main/assets/Git; MIT notice/provenance в APK.
+App background prepare → verified same-directory atomic replacement; существующий valid
+target переиспользовать; не загружать RAM/native model при простом извлечении asset.
+Альтернатива ручного импорта теперь fallback, не основной путь.
+Первый configure FAIL: SourceSets Provider запрещён. Предложен поддерживаемый Variant
+Sources API, без upgrades/новых dependencies или отключения AGP проверки.
+Fix затем разрешён/внесён: Variant Sources API generated source directory с task provider,
+без upgrades/gradle.properties flags. assembleDebug/4 tests/lintDebug PASS1m5s.
+APK172267453 bytes; model132440544/SHA256 и NOTICE в actual ZIP проверены PASS.
+Установка bundled APK не выполнялась; не выдавать host tests за device приёмку.
+
+## D031 — Автоматический документный маршрут и подробный многочастный RAG (2026-11-02)
+
+Статус: запрос пользователя реализован, сборка/54targeted tests/lint PASS; device ещё впереди.
+Пользователь отклонил UI переключатель: context-aware document routing в любой момент чата.
+Решение: validated JSON route по current question/recent6 turns/doc flags, reformulated
+standalone query для followup. Other → прежний chat/calendar; doc branch не меняет pending
+CalendarSession и не использует calendar tools. Качество семантического выбора проверить вручную.
+Для подробности — все search hits, exact-budget batches/source splitting и до1024 output tokens
+на порцию. Полные original fragments добавлены отдельным app-labelled разделом того же ответа,
+чтобы генеративное резюме не скрывало детали. Это top-ranked search, не весь архив exhaustive.
+Source IDs валидируются; сбой одной порции обозначается с raw evidence, не fake answer.
+Persist v2 documentRelated/source metadata, raw markers не strip у doc replies; original links
+в bubble, requestId/cancel guard; ordinary prompt не получает raw retrieved messages.
+Alternatives rejected: UI document toggle (пользователь), единственный увеличенный prompt
+(не вмещает все sources в2048), только длинный summary (не гарантирует сохранение деталей).
+Проверки: assembleDebug/54 targeted tests/lintDebug PASS44с; не device/не real semantic accuracy.
+
+## D032 — Explicit doc Switch и short→full по snapshot вместо auto-route (2026-11-02)
+
+Статус: новый UX явно одобрен, код добавлен, проверки заблокированы; заменяет D031.
+Пользователь сообщил calendar/doc misrouting и technical output. Решение: OFF(default)
+исключает DocumentChatGateway из send/newChat idle; ON строго documents без LLM router.
+Initial short processed384; Full action только completed primary short приON, новое сообщение,
+immutable evidence/question snapshotpersistv3, iterative synthesis без appended raw chunks.
+Ошибка full остаётся ошибкой, technical evidence не заменяет Qwen. Sources — отдельные links.
+Calendar punct trim раньше cleanup устраняет возможный QUERY «в календаре» в вопросах с ?.
+Run assembleDebug/9suites/lint FAIL:95tests/39fail (38calendar Regex portability на JDK25
+предполагается;1wrong exception expectation при корректном cite rejection). До дальнейших
+fixes остановились по инструкции пользователя. Не считать APK проверенным/device-ready.
+Следующий блок — явные Unicode boundaries/test expectation после согласия. См. CHAT_DOCUMENT_MODE.md.
+
+## D033 — Переносимые Calendar Unicode boundaries и qualifiers всех weekdays (2026-11-02)
+
+Статус: fixes/расширенные tests разрешены; assembleDebug/308tests/lintDebug PASS34с.
+Java25 probe подтвердил ASCII default\b для русских слов; менять JDK/flags значило бы скрыть
+проблему. CalendarRegex заменяет controlled pattern\b на explicit Unicode letter/mark/number/_
+boundary; применяется в3 parser files без изменения capture groups/date arithmetic.
+Qualifiers consumed для7 дней и падежей: current/previous/next calendar week сMonday start;
+contradictions дают clarification. Punctuation trim до suffix removal устраняет QUERY «в календаре».
+Проверки:70data scenarios×3=210 +boundary3 +прежние95, все308 PASS. Citation test expectation
+исправлено точно, validator не ослаблен. Versions/API/account/permissions не менялись.
+Устройство/Google API не использовались; Android execution/real Qwen ещё проверить вручную.
+Checkpoint: CHAT_DOCUMENT_MODE.md.
+
+## D034 — READ не должен искать служебное «у меня» в названиях событий (2026-11-03)
+
+Статус: минимальное исправление и проверки разрешены,326calendar tests/build/lint PASS42с.
+Exact before-fix test подтвердил QUERY="у меня" у date-only possessive question: дата верна,
+но app local filter отбрасывает события, не содержащие этих слов.
+Решение: после существующей очистки, только для READ, пустить whole-service-only остаток
+в empty content; не снимать реальные title filters. Quoted title «У меня» сохранён/проверен.
+Не менять API/аккаунт/range/permissions или другие системы. 70relative scenarios теперь
+имеют4 checks=280, DateRead7 и прочие suites дают326PASS. Device/live events не использовались;
+APK не установлен. Следующая приёмка — точный запрос на устройстве по разрешению пользователя.
+
+## D035 — READ tense framing не является title query (2026-11-03)
+
+Статус: minimal Calendar fix разрешён, build/399targeted calendar tests/lint PASS19с.
+Продолжение D034: date-only question с «были» сохраняла слово как query; правильная дата
+не спасает от local filter. Whole-service-only READ grammar дополнена были/было/был/будут/
+будет/есть, без удаления настоящих query words. Quoted titles сэтими словами сохраняются.
+Exact past Saturday и synthetic returned event проверены; relative matrix350+остальные49.
+Другие задачи отложены. APK не установлен, live Calendar/аккаунт/device не использовались.
+
+## D036 — Calendar success только из исполнителя, исходный read-set отдельно (2026-11-03)
+
+Статус: user demanded no calendar simulation; code и453 targeted tests/build/lint PASS.
+Subject-first supported time changes распознаются вне quoted data, неразобранные writes
+получают app clarification. Dispatcher backstop и исключение Calendar reports из ordinary
+history убирают путь имитации success формата; system prompt не основной механизм.
+Session original resultSet/resultSelector отделены от active selection. App-owned bool
+useResultSet позволяет named UPDATE в том же original day; only successful provider writes
+меняют cached read set. Confirm/проверка stale event/API response до UI результата обязательны.
+Alternative простой prompt-only запрет недостаточен; переиспользовать один narrowed set
+недостаточно для второй записи. Version4 optional metadata обратно совместимы.
+Проверки: separate confirmations, API writes/IDs, same-name other day, cancel/retry/error/
+no-op, clarification, quoted data, Tasks/chat/history/mode regressions. Финал453PASS7с.
+Screenshots ignored/private, данные не в docs/logs. APK не установлен, device QA впереди.
+
+## D037 — Уточнение сохраняет active move, destination и clock отдельны от duration (2026-11-03)
+
+Статус: user одобрил реализацию/проверки, assembleDebug/460targeted tests/lintDebug PASS28с.
+Решение: CalendarTurnPlan.clarificationFields app-owned, полноценный UPDATE проходит
+target resolution+draft staging до question; pending slots не живут только в тексте Qwen.
+Absolute hour phrase0..23 без later/earlier → clock, explicit duration → duration,
+неоднозначный relative offset → awaited date/time. Invalid bare reply сохраняет awaited slot.
+GENERAL remark не отменяет Calendar action; new Calendar op/CANCEL/newChat/account reset
+явно заменяют его. Session в памяти runtime, без обещаний disk/process-death восстановления.
+Нельзя повторно искать moved known ID по старой дате: local trusted result match+fresh GET
+и pre-write validation вместо потери цели. Confirmation/API-success обязательны.
+Date-only сохраняет actual old time/duration; date+time поддерживает weekday/named/numeric.
+Альтернатива раннему CLARIFY без draft отклонена как причина потери действия; угадывание
+relative shift/длительности отклонено. Полный synthetic workflow460PASS, device QA впереди.
+
 ## Формат нового решения
 ID и дата; статус (предложено/принято/заменено); контекст; решение; альтернативы; последствия; способ проверки.
 Не удалять старые решения: помечать заменёнными с указанием нового ID.

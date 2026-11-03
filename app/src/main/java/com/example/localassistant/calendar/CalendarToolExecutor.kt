@@ -107,7 +107,7 @@ class CalendarToolExecutor(
                     if (request.objectKind == CalendarObjectKind.TASK) createTask(request, now, token) else create(request, now, token)
                 }
                 CalendarOp.UPDATE, CalendarOp.DELETE -> {
-                    change(request, now, token)
+                    change(request, now, token, command.plan.clarificationFields, command.plan.message)
                 }
             }
         } catch (t: CancellationException) {
@@ -213,7 +213,7 @@ class CalendarToolExecutor(
             return CalendarToolResult.Ok("Списки Google Tasks:\n" + result.getOrNull().orEmpty().joinToString("\n") { "• ${it.title}" })
         }
         // An unsuccessful new/narrowed search must not leave an older set eligible for "delete them".
-        session.rememberResults(emptyList(), request)
+        session.rememberReadResults(emptyList(), request)
         session.rememberDraft(request)
         if (request.op == CalendarOp.SEARCH && request.query.isNullOrBlank()) {
             session.await(setOf(CalendarField.QUERY))
@@ -232,7 +232,7 @@ class CalendarToolExecutor(
         }
         val selector = request.copy(date = range?.start?.toLocalDate()?.toString(), days = range?.let(::rangeDays))
         session.finish(events)
-        session.rememberResults(events, selector)
+        session.rememberReadResults(events, selector)
         val header = (if (request.objectKind == CalendarObjectKind.TASK) "Задачи Google Tasks " else if (request.op == CalendarOp.SEARCH) "Результаты поиска " else "События ") +
             (range?.let(::period) ?: "(все даты, включая задачи без даты)")
         CalendarAssistantDebug.log("executor ${request.op}: result=Ok, complete_result_set=true, days=${range?.let(::rangeDays)}")
@@ -303,7 +303,8 @@ class CalendarToolExecutor(
 
     private data class Plan(val before: CalendarEvent, val update: PreparedCalendarUpdate?)
 
-    private suspend fun change(request: CalendarToolRequest, now: ZonedDateTime, token: Long): CalendarToolResult {
+    private suspend fun change(request: CalendarToolRequest, now: ZonedDateTime, token: Long,
+                               clarificationFields: Set<CalendarField> = emptySet(), clarificationMessage: String? = null): CalendarToolResult {
         val sourceDate = request.sourceDate ?: request.date.takeIf { request.op == CalendarOp.DELETE }
         val priorSelector = session.selector.takeIf { request.contextAction == CalendarContextAction.CONTINUE && sourceDate == null }
         val range = if (priorSelector != null) CalendarTime.queryRange(priorSelector.date, priorSelector.days, 30, now)
@@ -326,15 +327,10 @@ class CalendarToolExecutor(
         val candidates = if (fromContext) {
             CalendarAssistantDebug.log("executor ${request.op}: target_resolution=session")
             if (request.query != null && request.query != session.selector?.query) {
-                val foundSelector = session.selector
-                val starts = session.targets.mapNotNull { it.startInZone(now.zone)?.toLocalDate() }
-                val narrowedRange = if (foundSelector != null) CalendarTime.queryRange(foundSelector.date, foundSelector.days, 30, now)
-                    else if (starts.isNotEmpty()) CalendarTime.QueryRange(
-                        starts.min().atStartOfDay(now.zone), starts.max().plusDays(1).atStartOfDay(now.zone)) else range
-                val narrowed = load(request, request.query, if (unboundedTasks) null else narrowedRange, request.titleQuery)
-                if (narrowed.isFailure) return mapFailure(narrowed.exceptionOrNull(), false)
-                val ids = narrowed.getOrNull().orEmpty().mapTo(mutableSetOf()) { it.id }
-                session.targets.filter { it.id in ids }
+                // IDs come from real read/write results. An event may already have moved outside
+                // the original read day; re-searching that day would incorrectly lose it.
+                // Each selected ID is fetched and revalidated below before any confirmation/write.
+                session.targets.filter { CalendarEventSearch.matches(it, request.query, request.titleQuery) }
             } else session.targets
         } else {
             if (request.query.isNullOrBlank() && sourceDate == null && !(request.objectKind == CalendarObjectKind.TASK && request.allMatches)) {
@@ -374,6 +370,11 @@ class CalendarToolExecutor(
         // Freeze the resolved target set while asking for missing update slots.
         session.rememberResults(selected, selector)
         session.rememberDraft(request.copy(contextAction = CalendarContextAction.CONTINUE))
+        if (clarificationFields.isNotEmpty()) {
+            require(request.op == CalendarOp.UPDATE && clarificationFields.all { it in setOf(CalendarField.DATE, CalendarField.TIME) })
+            session.await(clarificationFields)
+            return CalendarToolResult.Clarification(clarificationMessage ?: "Уточните дату или время переноса. Изменение ещё не выполнено.")
+        }
         if (request.op == CalendarOp.UPDATE && request.date == null && request.time == null &&
             request.title == null && request.duration == null && request.endTime == null &&
             request.location == null && request.description == null && request.taskStatus == null && !request.clearDate) {
@@ -390,8 +391,8 @@ class CalendarToolExecutor(
             if (fetched.isFailure) return mapFailure(fetched.exceptionOrNull(), false)
             val current = fetched.getOrNull() ?: return CalendarToolResult.Error("Запись больше не найдена. Повторите поиск.")
             require(matches(current)) { "Исходные параметры записи изменились. Повторите поиск." }
-            require(!request.titleQuery || request.query.isNullOrBlank() || CalendarEventSearch.matches(current, request.query, titleOnly = true)) {
-                "Название найденного события изменилось. Повторите поиск перед переименованием."
+            require(request.query.isNullOrBlank() || CalendarEventSearch.matches(current, request.query, titleOnly = request.titleQuery)) {
+                "Данные найденного события изменились. Повторите поиск перед изменением."
             }
             plans += Plan(current, if (request.op == CalendarOp.UPDATE) {
                 if (current.kind == CalendarObjectKind.TASK) GoogleTaskUpdate.prepare(current, request, now) else CalendarEventUpdate.prepare(current, request, now)
@@ -466,6 +467,7 @@ class CalendarToolExecutor(
                 remaining.removeAll { it.id == plan.before.id }
                 val actual = result.getOrNull() ?: plan.before
                 if (plan.update != null) remaining += actual
+                if (token == generation) session.applyWrittenResult(actual, deleted = plan.update == null)
                 successful += actual
             }
         }

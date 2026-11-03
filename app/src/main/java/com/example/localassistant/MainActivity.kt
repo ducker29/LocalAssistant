@@ -18,6 +18,7 @@ import com.example.localassistant.calendar.CalendarViewModel
 import com.example.localassistant.chat.ChatScreen
 import com.example.localassistant.chat.ChatViewModel
 import com.example.localassistant.ui.theme.LocalAssistantTheme
+import com.example.localassistant.ui.AssistantRoot
 import com.example.localassistant.voice.VoiceViewModel
 import com.google.android.gms.common.AccountPicker
 import kotlinx.coroutines.launch
@@ -82,6 +83,7 @@ class MainActivity : ComponentActivity() {
                         repository = container.modelRepository,
                         conversationStore = container.conversationStore,
                         calendar = calendarViewModel,
+                        documents = container.documentChat,
                     )
                 )
                 val voiceViewModel: VoiceViewModel = viewModel(
@@ -100,11 +102,20 @@ class MainActivity : ComponentActivity() {
                         IntentSenderRequest.Builder(request.pendingIntent).build()
                     )
                 }
-                ChatScreen(
+                AssistantRoot(
+                    onLeaveChat = {
+                        chatViewModel.stopGeneration()
+                        voiceViewModel.stopAndHold()
+                        voiceViewModel.cancelTranscription()
+                    },
+                ) { onBackToLobby ->
+                    ChatScreen(
                     state = state,
                     voice = voiceState,
                     calendar = calendarViewModel,
                     onInputChange = chatViewModel::onInputChange,
+                    onDocumentSearchChange = chatViewModel::setDocumentSearchEnabled,
+                    onFullDocumentAnswer = chatViewModel::requestFullDocumentAnswer,
                     onSend = chatViewModel::send,
                     onStop = chatViewModel::stopGeneration,
                     onContinue = chatViewModel::continueGeneration,
@@ -145,7 +156,9 @@ class MainActivity : ComponentActivity() {
                     onCalendarCancel = { chatViewModel.cancelCalendarPending() },
                     onCalendarSettingsDismiss = { chatViewModel.dismissCalendarSettingsPrompt() },
                     calendarConfigured = connectionState is com.example.localassistant.calendar.CalendarConnectionState.Connected,
+                    onBackToLobby = onBackToLobby,
                 )
+                }
             }
         }
     }

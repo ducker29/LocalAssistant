@@ -5,8 +5,8 @@ import java.time.ZonedDateTime
 /** Stateless interpretation/grounding. Session remains the sole owner of task/object state. */
 internal object CalendarTurnPolicy {
     private val quotes = Regex("«[^»]*»|\"[^\"]*\"|“[^”]*”")
-    private val commands = Regex(
-        "(?:^|[,;.!?]\\s*|\\b(?:и|затем|потом)\\s+)(?:пожалуйста\\s+)?" +
+    private val commands = calendarRegex(
+        "(?:^(?:(?:а|теперь|тогда)\\s+)?|[,;.!?]\\s*|\\b(?:и|затем|потом)\\s+)(?:пожалуйста\\s+)?" +
             "(?:(?:можешь|можете|прошу|хочу|нужно|надо|давай)\\s+)?" +
             "(найди(?:те)?|найти|покажи(?:те)?|показать|создай(?:те)?|создать|добавь(?:те)?|добавить|" +
             "запланируй(?:те)?|запланировать|перенеси(?:те)?|перенести|измени(?:те)?|изменить|" +
@@ -14,18 +14,25 @@ internal object CalendarTurnPolicy {
             "заверши(?:те)?|завершить|выполни(?:те)?|выполнить|отметь(?:те)?|отметить|верни(?:те)?|вернуть)\\b",
         RegexOption.IGNORE_CASE,
     )
-    private val reference = Regex("\\b(их|его|ее|это событие|эти события|эту задачу|эти задачи|найденн[а-я]*|выбранн[а-я]*)\\b")
+    private val reference = calendarRegex("\\b(их|его|ее|это событие|эти события|эту задачу|эти задачи|найденн[а-я]*|выбранн[а-я]*)\\b")
     private val calendarWords = Regex("событи|задач|встреч|созвон|календар|расписани|завтра|сегодня|недел|планерк|совещан|собрани|трениров")
-    private val general = Regex("^(расскажи|объясни|переведи|напиши|привет|спасибо|что такое|как работает|почему)\\b")
-    private val cancel = Regex("^(отмена|отмени|забудь|стоп|передумал[а-я]*|не надо|не удаляй|не создавай)\\b")
+    private val general = calendarRegex("^(расскажи|объясни|переведи|напиши|привет|спасибо|что такое|как работает|почему)\\b")
+    private val cancel = calendarRegex("^(отмена|отмени|забудь|стоп|передумал[а-я]*|не надо|не удаляй|не создавай)\\b")
+    private val embeddedMove = calendarRegex("\\b(перенеси(?:те)?|перенести|измени(?:те)?|изменить|поменяй(?:те)?|поменять)\\b", RegexOption.IGNORE_CASE)
+    private val timeChangeTail = calendarRegex(
+        "^\\s*(?:время\\s+)?(?:с\\s+\\d{1,2}(?::\\d{2})?\\s+)?(?:на|в|к)\\s+\\d{1,2}(?::\\d{2})?(?:\\s*час(?:а|ов)?)?[.!?]*\\s*$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val writeHint = calendarRegex("\\b(?:перенес[а-я]*|перенос[а-я]*|измен[а-я]*|помен[а-я]*|переимен[а-я]*|удал[а-я]*|созда[а-я]*|добав[а-я]*|сдвин[а-я]*|передвин[а-я]*)\\b")
+    private val clockHint = calendarRegex("\\b(?:на|в|к)\\s+\\d{1,2}(?::\\d{2})?\\b")
 
     fun prepare(session: CalendarSession, text: String, now: ZonedDateTime): CalendarTurnPlan {
         val original = text.trim()
         val quoteRanges = quotes.findAll(original).map { it.range }.toList()
         val rename = CalendarRenameExpression.find(original, quoteRanges)
-        val listExpression = Regex("\\b(?:в|из|по)\\s+спис(?:ке|ка|ок)\\s+(«[^»]+»|\"[^\"]+\"|[\\p{L}\\p{N}_-]+)", RegexOption.IGNORE_CASE)
+        val listExpression = calendarRegex("\\b(?:в|из|по)\\s+спис(?:ке|ка|ок)\\s+(«[^»]+»|\"[^\"]+\"|[\\p{L}\\p{N}_-]+)", RegexOption.IGNORE_CASE)
             .findAll(original).firstOrNull { candidate -> quoteRanges.none { candidate.range.first in it } }
-        val details = Regex("\\b(описание|место|адрес)\\s*[:—-]\\s*(.+?)(?=\\s+\\b(?:описание|место|адрес)\\s*[:—-]|$)",
+        val details = calendarRegex("\\b(описание|место|адрес)\\s*[:—-]\\s*(.+?)(?=\\s+\\b(?:описание|место|адрес)\\s*[:—-]|$)",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).findAll(original)
             .filter { rename == null || !overlaps(it.range, rename.valueRange) }.toList()
         val masked = quotes.replace(original) { " ".repeat(it.value.length) }.mapIndexed { i, c ->
@@ -45,8 +52,25 @@ internal object CalendarTurnPolicy {
         if (rename?.ambiguous == true) return plan(CalendarTurnTransition.CLARIFY, message =
             "Укажите названия в кавычках, например: измени название «Старое» на «Новое».")
             .copy(resetOnClarify = true)
-        val newSubject = Regex("^(?:(?:а|теперь|тогда)\\s+)*(?:другое событие|другая задача|другую задачу|новое событие|новая задача)\\b").find(normalized)
-        val matches = commands.findAll(masked).toList()
+        val newSubject = calendarRegex("^(?:(?:а|теперь|тогда)\\s+)*(?:другое событие|другая задача|другую задачу|новое событие|новая задача)\\b").find(normalized)
+        val anchored = commands.findAll(masked).toList()
+        val knownCalendar = session.objectKind != null || session.resultSet.isNotEmpty()
+        val embedded = if (anchored.isEmpty() && (knownCalendar || calendarTopic)) embeddedMove.findAll(masked).singleOrNull { candidate ->
+            original.substring(0, candidate.range.first).isNotBlank() &&
+                timeChangeTail.matches(masked.substring(candidate.range.last + 1))
+        } else null
+        val matches = if (embedded != null) listOf(embedded) else anchored
+        val quotedResultReference = quoteRanges.any { range ->
+            val title = original.substring(range).trim('«', '»', '"', '“', '”')
+            (session.resultSet + session.targets).any { CalendarEventSearch.matches(it, title, titleOnly = true) }
+        }
+        val ellipticalWrite = knownCalendar && clockHint.containsMatchIn(normalized) &&
+            (quotedResultReference || calendarRegex("^(?:а\\s+)?(?:друг[а-я]*|втор[а-я]*|перв[а-я]*|остальн[а-я]*|его|ее|их|это|эту)\\b").containsMatchIn(normalized))
+        if (matches.isEmpty() && (knownCalendar || calendarTopic || clockHint.containsMatchIn(normalized)) &&
+            (writeHint.containsMatchIn(normalized) || ellipticalWrite)) {
+            return plan(CalendarTurnTransition.CLARIFY, message =
+                "Уточните, какое событие изменить и что именно: например, «перенеси [название] на 16:00». Изменение ещё не выполнено.")
+        }
         val ops = matches.map { commandOperation(normalize(it.groupValues[1])) }
         val clears = clearFields(normalized)
         val writes = ops.filter { it != CalendarOp.READ }.toSet().let {
@@ -54,25 +78,25 @@ internal object CalendarTurnPolicy {
         }
         if (writes.size > 1) return plan(CalendarTurnTransition.CLARIFY, message = "Уточните одно действие: создание, изменение или удаление.")
             .copy(resetOnClarify = true)
-        val question = Regex("^(есть(?: ли)?|что|какие|мои|расписание|список|списки)\\b").containsMatchIn(normalized) && calendarTopic
+        val question = calendarRegex("^(есть(?: ли)?|что|какие|мои|расписание|список|списки)\\b").containsMatchIn(normalized) && calendarTopic
         val temporalFollowup = session.draft == null && session.selector != null &&
             CalendarTemporalExpression.isOnlyExpression(normalized)
         val explicit = writes.firstOrNull() ?: CalendarOp.READ.takeIf { ops.isNotEmpty() || question || temporalFollowup }
-        val tasks = Regex("\\bзадач[а-я]*\\b").containsMatchIn(normalized)
-        val events = Regex("\\b(?:событи[а-я]*|мероприяти[а-я]*)\\b").containsMatchIn(normalized)
+        val tasks = calendarRegex("\\bзадач[а-я]*\\b").containsMatchIn(normalized)
+        val events = calendarRegex("\\b(?:событи[а-я]*|мероприяти[а-я]*)\\b").containsMatchIn(normalized)
         val mixed = Regex("(?:задач[а-я]*\\s+и\\s+событи[а-я]*|событи[а-я]*\\s+и\\s+задач[а-я]*)").containsMatchIn(normalized)
         val typeWordIsTitleReply = explicit == null && newSubject == null && CalendarField.TITLE in session.awaiting &&
-            !Regex("\\b(?:именно|только|это)\\s+(?:задач|событи)").containsMatchIn(normalized)
+            !calendarRegex("\\b(?:именно|только|это)\\s+(?:задач|событи)").containsMatchIn(normalized)
         if (mixed && !typeWordIsTitleReply) return plan(CalendarTurnTransition.CLARIFY, message = "Уточните один тип: события Calendar или задачи Google Tasks.").copy(resetOnClarify = true)
         // References must identify the object, not a possessive pronoun buried in a new title.
         val combinedLookup = ops.any { it == CalendarOp.READ } && writes.isNotEmpty()
-        val referenceArgument = Regex("^(?:(?:мне|пожалуйста)\\s+)*(?:их|его|ее|это событие|эти события|эту задачу|эти задачи|найденн[а-я]*|выбранн[а-я]*)\\b")
+        val referenceArgument = calendarRegex("^(?:(?:мне|пожалуйста)\\s+)*(?:их|его|ее|это событие|эти события|эту задачу|эти задачи|найденн[а-я]*|выбранн[а-я]*)\\b")
         val hasRef = !combinedLookup && (reference.matches(normalized) ||
             matches.any { referenceArgument.containsMatchIn(normalize(masked.substring(it.range.last + 1))) } ||
             rename?.source?.let { reference.matches(normalize(it)) } == true)
-        val correction = Regex("\\b(время|дат[ау]|названи[ея]|описание|место)\\b").containsMatchIn(normalized)
+        val correction = calendarRegex("\\b(время|дат[ау]|названи[ея]|описание|место)\\b").containsMatchIn(normalized)
         val fieldReference = explicit == CalendarOp.UPDATE && ((rename != null && rename.source.isBlank()) ||
-            Regex("^(?:измени|поменяй|очисти|переименуй)\\s+(?:его\\s+)?(?:время|дату|название|описание|место)\\s*(?:на\\b|в\\b|:|$)").containsMatchIn(normalized))
+            calendarRegex("^(?:измени|поменяй|очисти|переименуй)\\s+(?:его\\s+)?(?:время|дату|название|описание|место)\\s*(?:на\\b|в\\b|:|$)").containsMatchIn(normalized))
         val draftFieldEdit = explicit == CalendarOp.UPDATE && session.draft?.op == CalendarOp.CREATE && correction &&
             (rename == null || rename.source.isBlank() || reference.matches(normalize(rename.source)))
         val inheritSource = (explicit == null && (session.draft != null || session.pendingSubject != null)) ||
@@ -115,16 +139,23 @@ internal object CalendarTurnPolicy {
         if (objectKind == CalendarObjectKind.EVENT && listExpression != null) return plan(CalendarTurnTransition.CLARIFY,
             message = "Список относится к Google Tasks. Для задачи явно укажите слово «задача»; события не помещаются в списки Tasks.").copy(resetOnClarify = true)
         if (objectKind == CalendarObjectKind.TASK && explicit in setOf(CalendarOp.CREATE, CalendarOp.UPDATE, CalendarOp.DELETE) &&
-            Regex("\\bспис(?:ок|ки)\\s+задач\\b").containsMatchIn(normalized)) return plan(CalendarTurnTransition.CLARIFY,
+            calendarRegex("\\bспис(?:ок|ки)\\s+задач\\b").containsMatchIn(normalized)) return plan(CalendarTurnTransition.CLARIFY,
                 message = "Пока доступен просмотр и выбор списков. Управление самими списками выполняйте в Google Tasks.").copy(resetOnClarify = true)
-        val listsOnly = objectKind == CalendarObjectKind.TASK && operation == CalendarOp.READ && Regex("\\bсписки\\s+задач\\b").containsMatchIn(normalized)
+        val listsOnly = objectKind == CalendarObjectKind.TASK && operation == CalendarOp.READ && calendarRegex("\\bсписки\\s+задач\\b").containsMatchIn(normalized)
         if (objectKind == CalendarObjectKind.TASK && operation == CalendarOp.UPDATE &&
-            listExpression?.value?.let { Regex("^в\\s+список\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) } == true &&
+            listExpression?.value?.let { calendarRegex("^в\\s+список\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) } == true &&
             matches.any { normalize(it.groupValues[1]).startsWith("перенес") }) return plan(CalendarTurnTransition.CLARIFY,
                 message = "Перемещение между списками пока не поддержано. Можно изменить дату, название, описание или статус задачи.").copy(resetOnClarify = true)
         val values = mutableMapOf<CalendarField, CalendarFieldValue>()
         val spans = matches.mapTo(mutableListOf()) { it.range }.apply { addAll(details.map { it.range }) }
-        spans.addAll(Regex("\\bпожалуйста\\b", RegexOption.IGNORE_CASE).findAll(masked).map { it.range }.toList())
+        if (embedded != null) {
+            calendarRegex("^(?:а|теперь|тогда)\\b\\s+", RegexOption.IGNORE_CASE).find(masked)?.let { spans += it.range }
+            val tailStart = embedded.range.last + 1
+            calendarRegex("^\\s*время\\b\\s+", RegexOption.IGNORE_CASE).find(masked.substring(tailStart))?.let {
+                spans += (tailStart + it.range.first)..(tailStart + it.range.last)
+            }
+        }
+        spans.addAll(calendarRegex("\\bпожалуйста\\b", RegexOption.IGNORE_CASE).findAll(masked).map { it.range }.toList())
         newSubject?.let { spans += it.range }
         rename?.let { spans += it.valueRange; it.labelRange?.let { range -> spans += range } }
         listExpression?.let { spans += it.range }
@@ -133,16 +164,16 @@ internal object CalendarTurnPolicy {
         var statusFilter: GoogleTaskStatus? = null
         if (objectKind == CalendarObjectKind.TASK) {
             val stableText = masked.lowercase(java.util.Locale.forLanguageTag("ru")).replace('ё', 'е')
-            val statusWords = Regex("\\b(?:как\\s+)?(?:не\\s+)?(?:невыполнен[а-я]*|незавершен[а-я]*|выполнен[а-я]*|завершен[а-я]*|готов[а-я]*)\\b")
+            val statusWords = calendarRegex("\\b(?:как\\s+)?(?:не\\s+)?(?:невыполнен[а-я]*|незавершен[а-я]*|выполнен[а-я]*|завершен[а-я]*|готов[а-я]*)\\b")
             val statusMatches = statusWords.findAll(stableText).toList()
-            fun state(value: String) = if (Regex("невыполн|незаверш|\\bне\\s+").containsMatchIn(value)) GoogleTaskStatus.NEEDS_ACTION else GoogleTaskStatus.COMPLETED
+            fun state(value: String) = if (calendarRegex("невыполн|незаверш|\\bне\\s+").containsMatchIn(value)) GoogleTaskStatus.NEEDS_ACTION else GoogleTaskStatus.COMPLETED
             val status = when {
                 matches.any { normalize(it.groupValues[1]).startsWith("верн") } -> GoogleTaskStatus.NEEDS_ACTION
                 matches.any { Regex("^(заверш|выполн)").containsMatchIn(normalize(it.groupValues[1])) } -> GoogleTaskStatus.COMPLETED
                 else -> statusMatches.lastOrNull()?.value?.let(::state)
             }
             spans.addAll(statusMatches.map { it.range })
-            Regex("\\b(?:в работу|к выполнению)\\b").find(normalized)?.let { spans += it.range }
+            calendarRegex("\\b(?:в работу|к выполнению)\\b").find(normalized)?.let { spans += it.range }
             if (operation in setOf(CalendarOp.UPDATE, CalendarOp.CREATE) && status != null) put(CalendarField.STATUS, status.wire)
             if (operation in setOf(CalendarOp.READ, CalendarOp.SEARCH)) statusFilter = statusMatches.map { state(it.value) }.distinct().singleOrNull()
         }
@@ -176,7 +207,7 @@ internal object CalendarTurnPolicy {
         if (!dateFound && CalendarField.DATE in session.awaiting && normalized.matches(Regex("\\d{1,2}"))) {
             date("day:$normalized", original.indices)
         }
-        val shift = Regex("\\bс\\s+(\\d{1,2}(?::\\d{2})?)\\s*(?:час(?:а|ов)?\\s+)?на\\s+(\\d{1,2}(?::\\d{2})?)(?:\\s*час(?:а|ов)?)?\\b", RegexOption.IGNORE_CASE).find(masked)
+        val shift = calendarRegex("\\bс\\s+(\\d{1,2}(?::\\d{2})?)\\s*(?:час(?:а|ов)?\\s+)?на\\s+(\\d{1,2}(?::\\d{2})?)(?:\\s*час(?:а|ов)?)?\\b", RegexOption.IGNORE_CASE).find(masked)
         fun clock(raw: String): String? {
             val parts = raw.split(':')
             val h = parts[0].toIntOrNull() ?: return null
@@ -188,15 +219,24 @@ internal object CalendarTurnPolicy {
             clock(shift.groupValues[2])?.let { put(CalendarField.TIME, it) }
             spans += shift.range
         }
-        val duration = Regex("\\b(?:на|длительностью|продолжительностью|длительность)\\s+(\\d+)\\s*(минут[а-я]*|час[а-я]*|дн[а-я]*)", RegexOption.IGNORE_CASE).find(masked)
-        if (duration != null && (operation == CalendarOp.CREATE || normalize(duration.value).startsWith("длитель"))) {
+        val duration = calendarRegex("\\b(?:на|длительностью|продолжительностью|длительность)\\s+(\\d+)\\s*(минут[а-я]*|час[а-я]*|дн[а-я]*)", RegexOption.IGNORE_CASE).find(masked)
+        var clarificationFields = emptySet<CalendarField>()
+        val relativeShift = calendarRegex("\\b(?:позже|раньше|вперед|вперёд|назад)\\b", RegexOption.IGNORE_CASE).findAll(masked).toList()
+        val explicitDuration = duration != null && normalize(duration.value).let { it.startsWith("длитель") || it.startsWith("продолжитель") }
+        val absoluteHour = duration != null && operation == CalendarOp.UPDATE && !explicitDuration &&
+            normalize(duration.value).startsWith("на ") && normalize(duration.groupValues[2]).startsWith("час") &&
+            (duration.groupValues[1].toIntOrNull() ?: -1) in 0..23 && relativeShift.isEmpty()
+        if (duration != null && (operation == CalendarOp.CREATE || explicitDuration)) {
             val unit = when { normalize(duration.groupValues[2]).startsWith("мин") -> "m"; normalize(duration.groupValues[2]).startsWith("час") -> "h"; else -> "d" }
             put(CalendarField.DURATION, duration.groupValues[1] + unit)
             spans += duration.range
-        } else if (duration != null && operation == CalendarOp.UPDATE && shift == null) {
-            return plan(CalendarTurnTransition.CLARIFY, message = "Уточните точное новое время, например «на 16:00».")
+        } else if (duration != null && operation == CalendarOp.UPDATE && shift == null && !absoluteHour) {
+            // Keep the target and recognized operation: the executor stages a draft before asking.
+            clarificationFields = setOf(if (normalize(duration.groupValues[2]).startsWith("дн")) CalendarField.DATE else CalendarField.TIME)
+            spans += duration.range
+            spans.addAll(relativeShift.map { it.range })
         }
-        val clockPattern = Regex("\\b(?:(?:в|на|к|время)\\s*[-—:]?\\s*)?(\\d{1,2})(?::(\\d{2}))?(?:\\s*час(?:а|ов)?(?:\\s*(утра|вечера|дня|ночи))?)?\\b", RegexOption.IGNORE_CASE)
+        val clockPattern = calendarRegex("\\b(?:(?:в|на|к|время)\\s*[-—:]?\\s*)?(\\d{1,2})(?::(\\d{2}))?(?:\\s*час(?:а|ов)?(?:\\s*(утра|вечера|дня|ночи))?)?\\b", RegexOption.IGNORE_CASE)
         for (match in clockPattern.findAll(masked)) {
             if (spans.any { overlaps(it, match.range) }) continue
             val explicitTime = match.value.contains(':') || Regex("час|утра|вечера|дня|ночи|^(в|на|к|время)\\s", RegexOption.IGNORE_CASE).containsMatchIn(match.value)
@@ -223,17 +263,27 @@ internal object CalendarTurnPolicy {
         } else if (CalendarField.TIME in values && session.draft?.allDay == true && operation == CalendarOp.CREATE) {
             values[CalendarField.ALL_DAY] = CalendarFieldValue.Flag(false)
         }
-        var content = removeSpans(original, spans).trim()
-        content = content.replace(Regex("\\b(?:весь день|целый день|без времени)\\b", RegexOption.IGNORE_CASE), " ")
+        // Strip sentence punctuation before removing a trailing service phrase: otherwise
+        // «какие события в календаре завтра?» leaves «в календаре» as an event-title query.
+        var content = removeSpans(original, spans).trim(' ', ',', '.', '?', '!', ':', '—', '-')
+        content = content.replace(calendarRegex("\\b(?:весь день|целый день|без времени)\\b", RegexOption.IGNORE_CASE), " ")
         val prefix = if (operation == CalendarOp.CREATE && kind == CalendarTurnTransition.CONTINUE && explicit == null && CalendarField.TITLE in session.awaiting) "^$"
             else if (operation == CalendarOp.CREATE) "^(?:(?:мне|пожалуйста)\\b\\s*)*(?:(?:новую|новое)\\s+)?(?:(?:задачу|задача|событие|мероприятие)\\b\\s*)?"
             else "^(?:(?:мне|пожалуйста|мои|все|всех|что|какие|есть|ли|у меня|в календаре|список|именно|только)\\b\\s*)*" +
                 "(?:(?:событи(?:е|я|й|ю|ям|ями|ях)|задач(?:а|у|и|е|ей|ами|ах)?|мероприят(?:ие|ия|ий|ии|ию)|расписание)\\b\\s*)?"
-        content = content.replace(Regex(prefix, RegexOption.IGNORE_CASE), "")
+        content = content.replace(calendarRegex(prefix, RegexOption.IGNORE_CASE), "")
         if (operation != CalendarOp.CREATE || (session.pendingSubject != null && reference.matches(normalize(content)))) {
             content = content.replace(Regex("\\s*(?:и\\s+)?(?:их|его|ее|её|это событие|эти события|все|всех|в календаре)\\s*$", RegexOption.IGNORE_CASE), "")
         }
         content = content.replace(Regex("\\s+"), " ").trim(' ', ',', '.', '?', '!', ':', '—', '-')
+        // After the object word is consumed, a date-only listing can still leave a
+        // possessive/tense frame («события у меня сегодня», «события были вчера»). Only discard a WHOLE
+        // service-only remainder; real search words and quoted event names stay intact.
+        if (operation == CalendarOp.READ && calendarRegex(
+                "^(?:(?:у\\s+меня|в\\s+календаре|были|было|был|будут|будет|есть)\\b\\s*)+$", RegexOption.IGNORE_CASE,
+            ).matches(content)) {
+            content = ""
+        }
         val quoted = quotes.findAll(original).firstOrNull { quote -> details.none { overlaps(quote.range, it.range) } &&
             (listExpression == null || !overlaps(quote.range, listExpression.range)) &&
             (rename == null || !overlaps(quote.range, rename.valueRange)) }
@@ -257,7 +307,7 @@ internal object CalendarTurnPolicy {
             kind == CalendarTurnTransition.CONTINUE && CalendarField.QUERY in session.awaiting && content.isNotBlank() -> put(CalendarField.QUERY, quoted ?: content)
             kind == CalendarTurnTransition.CONTINUE && CalendarField.LIST in session.awaiting && content.isNotBlank() -> put(CalendarField.LIST, quoted ?: content)
             kind == CalendarTurnTransition.TARGETS && operation in setOf(CalendarOp.UPDATE, CalendarOp.DELETE) && !fieldReference -> {
-                val constraint = content.replace(Regex("^(?:(?:найденн[а-я]*|выбранн[а-я]*|эти|это|ее|её|его|их|события|событие)\\b\\s*)+", RegexOption.IGNORE_CASE), "").trim()
+                val constraint = content.replace(calendarRegex("^(?:(?:найденн[а-я]*|выбранн[а-я]*|эти|это|ее|её|его|их|события|событие)\\b\\s*)+", RegexOption.IGNORE_CASE), "").trim()
                 if (constraint.isNotBlank()) put(CalendarField.QUERY, quoted ?: constraint)
             }
         }
@@ -268,8 +318,8 @@ internal object CalendarTurnPolicy {
         } else emptySet()
         if (objectKind == CalendarObjectKind.TASK) values.remove(CalendarField.ALL_DAY)
         val finalOp = if (operation == CalendarOp.READ && CalendarField.QUERY in values) CalendarOp.SEARCH else operation
-        val all = Regex("\\b(все|всех|их|оба|обе|найденные|выбранные|эти события)\\b").containsMatchIn(normalized).takeIf {
-            explicit != null || Regex("\\b(все|всех|их|только одно|один)\\b").containsMatchIn(normalized)
+        val all = calendarRegex("\\b(все|всех|их|оба|обе|найденные|выбранные|эти события)\\b").containsMatchIn(normalized).takeIf {
+            explicit != null || calendarRegex("\\b(все|всех|их|только одно|один)\\b").containsMatchIn(normalized)
         }
         val subject = session.pendingSubject
         val useSubject = subject != null && newSubject == null && kind in setOf(CalendarTurnTransition.NEW, CalendarTurnTransition.NEW_OBJECT) &&
@@ -282,9 +332,29 @@ internal object CalendarTurnPolicy {
                 else -> field
             }
         } else emptyMap()
-        return plan(kind, finalOp.takeUnless { subjectOnly }, CalendarFieldPatch((inherited + values).filterKeys { it !in taskClears }, clears + taskClears), all)
+        val query = (values[CalendarField.QUERY] as? CalendarFieldValue.Text)?.value
+        if (kind == CalendarTurnTransition.CONTINUE && session.awaiting.size == 1) {
+            val missing = session.awaiting.single()
+            if (missing in setOf(CalendarField.DATE, CalendarField.TIME) && missing !in values)
+                clarificationFields = clarificationFields + missing
+        }
+        if (operation == CalendarOp.UPDATE && session.resultSet.isNotEmpty() &&
+            ((newSubject != null && query.isNullOrBlank()) || (!query.isNullOrBlank() && calendarRegex(
+                "^(?:друг[а-я]*|втор[а-я]*|перв[а-я]*|оставш[а-я]*|остальн[а-я]*)(?:\\s+(?:событи[а-я]*|встреч[а-я]*))?$",
+                RegexOption.IGNORE_CASE,
+            ).matches(query)))) {
+            return plan(CalendarTurnTransition.CLARIFY, message = "Укажите название события из предыдущего списка и новое время. Изменение ещё не выполнено.")
+        }
+        val useResultSet = kind == CalendarTurnTransition.NEW && operation == CalendarOp.UPDATE &&
+            session.draft == null && objectKind == session.objectKind && CalendarField.SOURCE_DATE !in values &&
+            !query.isNullOrBlank() && session.resultSet.any { CalendarEventSearch.matches(it, query, titleOnly = true) }
+        return plan(if (useResultSet) CalendarTurnTransition.TARGETS else kind, finalOp.takeUnless { subjectOnly }, CalendarFieldPatch((inherited + values).filterKeys { it !in taskClears }, clears + taskClears), all)
             .copy(usesPendingSubject = useSubject, titleQuery = rename != null && operation == CalendarOp.UPDATE,
-                objectKind = objectKind, taskListsOnly = listsOnly, taskStatusFilter = statusFilter)
+                objectKind = objectKind, taskListsOnly = listsOnly, taskStatusFilter = statusFilter, useResultSet = useResultSet,
+                clarificationFields = clarificationFields,
+                message = if (clarificationFields.isEmpty()) null else if (CalendarField.DATE in clarificationFields)
+                    "Уточните новую дату переноса. Событие выбрано, изменение ещё не выполнено."
+                else "Уточните точное новое время, например «на 16:00». Событие выбрано, изменение ещё не выполнено.")
     }
 
     /** Only current-turn, text-backed suggestions may supplement the app-extracted fields. */
@@ -303,6 +373,13 @@ internal object CalendarTurnPolicy {
         return CalendarFieldPatch(accepted + plan.seed.values, plan.seed.clear)
     }
 
+    /** Dispatcher backstop: a recognizer failure must not become a simulated calendar write. */
+    fun hasWriteIntent(text: String): Boolean {
+        val masked = normalize(quotes.replace(text) { " ".repeat(it.value.length) })
+        return writeHint.containsMatchIn(masked) &&
+            (calendarWords.containsMatchIn(masked) || clockHint.containsMatchIn(masked))
+    }
+
     private fun commandOperation(verb: String) = when {
         verb.startsWith("удал") -> CalendarOp.DELETE
         verb.startsWith("созда") || verb.startsWith("добав") || verb.startsWith("заплан") -> CalendarOp.CREATE
@@ -310,7 +387,7 @@ internal object CalendarTurnPolicy {
         else -> CalendarOp.UPDATE
     }
     private fun clearFields(text: String): Set<CalendarField> {
-        val field = Regex("(?:очисти(?:те)?|убери(?:те)?|сотри(?:те)?|удали(?:те)?)\\s+(описание|место|время|дату|название)\\b").find(text)?.groupValues?.get(1)
+        val field = calendarRegex("(?:очисти(?:те)?|убери(?:те)?|сотри(?:те)?|удали(?:те)?)\\s+(описание|место|время|дату|название)\\b").find(text)?.groupValues?.get(1)
         return setOfNotNull(when (field) {
             "описание" -> CalendarField.DESCRIPTION; "место" -> CalendarField.LOCATION
             "время" -> CalendarField.TIME; "дату" -> CalendarField.DATE; "название" -> CalendarField.TITLE

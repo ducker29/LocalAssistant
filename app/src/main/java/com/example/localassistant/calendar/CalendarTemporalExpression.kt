@@ -75,24 +75,25 @@ internal object CalendarTemporalExpression {
     )
     private val quantity = "\\d+|${quantities.keys.joinToString("|")}|несколько"
     private val prefix = "(?:(?:в\\s+течение|за|на|в)\\s+)?"
-    private val periods = Regex(
+    private val periods = calendarRegex(
         "\\b$prefix(?:(?:всю|весь|все)\\s+)?(эт(?:ой|у|а|от|ом|ого|и|их)|текущ[а-я]*|следующ[а-я]*|будущ[а-я]*|" +
             "предыдущ[а-я]*|прошл[а-я]*|прошедш[а-я]*|последн[а-я]*|ближайш[а-я]*)\\s+" +
             "(?:($quantity)\\s+)?(недел[а-я]*|месяц[а-я]*)\\b",
         RegexOption.IGNORE_CASE,
     )
-    private val barePeriods = Regex("\\b(на|за)\\s+(?:($quantity)\\s+)?(недел[а-я]*|месяц[а-я]*)\\b", RegexOption.IGNORE_CASE)
-    private val futureOffset = Regex("\\bчерез\\s+(?:($quantity)\\s+)?(день|дн[а-я]*|недел[а-я]*|месяц[а-я]*)\\b", RegexOption.IGNORE_CASE)
-    private val pastOffset = Regex("\\b(?:($quantity)\\s+)?(день|дн[а-я]*|недел[а-я]*|месяц[а-я]*)\\s+назад\\b", RegexOption.IGNORE_CASE)
-    private val weekdays = Regex(
-        "\\b(?:(?:на|в|во|за)\\s+)?(понедельник(?:а|у|ом|е)?|вторник(?:а|у|ом|е)?|сред[ауыое]|средой|" +
+    private val barePeriods = calendarRegex("\\b(на|за)\\s+(?:($quantity)\\s+)?(недел[а-я]*|месяц[а-я]*)\\b", RegexOption.IGNORE_CASE)
+    private val futureOffset = calendarRegex("\\bчерез\\s+(?:($quantity)\\s+)?(день|дн[а-я]*|недел[а-я]*|месяц[а-я]*)\\b", RegexOption.IGNORE_CASE)
+    private val pastOffset = calendarRegex("\\b(?:($quantity)\\s+)?(день|дн[а-я]*|недел[а-я]*|месяц[а-я]*)\\s+назад\\b", RegexOption.IGNORE_CASE)
+    private val weekdayQualifier = "эт(?:от|а|о|у|ой|ом|ого)|текущ[а-я]*|прошл[а-я]*|предыдущ[а-я]*|следующ[а-я]*|будущ[а-я]*"
+    private val weekdays = calendarRegex(
+        "\\b(?:(?:на|в|во|за)\\s+)?(?:($weekdayQualifier)\\s+)?(понедельник(?:а|у|ом|е)?|вторник(?:а|у|ом|е)?|сред[ауыое]|средой|" +
             "четверг(?:а|у|ом|е)?|пятниц(?:а|у|ы|е|ей)|суббот(?:а|у|ы|е|ой)|воскресень(?:е|я|ю|ем|и))\\b", RegexOption.IGNORE_CASE)
-    private val isoDate = Regex("\\b(?:(?:на|за|в)\\s+)?(\\d{4}-\\d{2}-\\d{2})\\b", RegexOption.IGNORE_CASE)
-    private val monthDay = Regex("\\b(?:(?:на|за|в)\\s+)?(\\d{1,2})(?:-?(?:е|ое|го))?\\s*числ[оае]\\b", RegexOption.IGNORE_CASE)
+    private val isoDate = calendarRegex("\\b(?:(?:на|за|в)\\s+)?(\\d{4}-\\d{2}-\\d{2})\\b", RegexOption.IGNORE_CASE)
+    private val monthDay = calendarRegex("\\b(?:(?:на|за|в)\\s+)?(\\d{1,2})(?:-?(?:е|ое|го))?\\s*числ[оае]\\b", RegexOption.IGNORE_CASE)
     private val monthNames = listOf("январ", "феврал", "март", "апрел", "мая", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
-    private val namedDate = Regex("\\b(?:(?:на|за|в)\\s+)?(\\d{1,2})(?:-?го)?\\s+(${monthNames.joinToString("|")})[а-я]*(?:\\s+(\\d{4}))?\\b", RegexOption.IGNORE_CASE)
+    private val namedDate = calendarRegex("\\b(?:(?:на|за|в)\\s+)?(\\d{1,2})(?:-?го)?\\s+(${monthNames.joinToString("|")})[а-я]*(?:\\s+(\\d{4}))?\\b", RegexOption.IGNORE_CASE)
     // Long words first and word boundaries: послезавтра is never parsed as завтра.
-    private val days = Regex(
+    private val days = calendarRegex(
         "\\b$prefix(позавчера[а-я]*|послезавтра[а-я]*|вчера[а-я]*|сегодня[а-я]*|завтра[а-я]*)\\b",
         RegexOption.IGNORE_CASE,
     )
@@ -154,7 +155,7 @@ internal object CalendarTemporalExpression {
             Match(ref, it.range, it.value.startsWith("на "), period = false)
         }
         val weekday = weekdays.findAll(normalized).firstOrNull { candidate ->
-            if (!candidate.groupValues[1].startsWith("сред")) true else {
+            if (!candidate.groupValues[2].startsWith("сред")) true else {
                 val prefix = Regex("^(?:на|в|во|за)\\s+").containsMatchIn(candidate.value)
                 val alone = normalized.trimEnd('?', '.', '!') == candidate.value
                 val adjacent = absolute?.let { date ->
@@ -165,10 +166,11 @@ internal object CalendarTemporalExpression {
                     }
                     between.all { it.isWhitespace() || it in ",()—-" }
                 } ?: false
-                prefix || alone || adjacent
+                prefix || alone || adjacent || candidate.groupValues[1].isNotEmpty()
             }
         }?.let {
-            val word = it.groupValues[1]
+            val adjective = it.groupValues[1]
+            val word = it.groupValues[2]
             val number = when {
                 word.startsWith("понедельник") -> 1; word.startsWith("вторник") -> 2
                 word.startsWith("сред") -> 3; word.startsWith("четверг") -> 4
@@ -176,7 +178,16 @@ internal object CalendarTemporalExpression {
                 else -> 7
             }
             val qualified = period?.let { match -> CalendarPeriodReference.parse(match.reference) }
+            val adjectiveWeek = when {
+                adjective.isEmpty() -> null
+                adjective.startsWith("прошл") || adjective.startsWith("предыдущ") -> "-1"
+                adjective.startsWith("следующ") || adjective.startsWith("будущ") -> "1"
+                else -> "0"
+            }
             val week = when {
+                adjectiveWeek != null && qualified != null && (qualified.unit != CalendarPeriodUnit.WEEK || qualified.count != 1 ||
+                    (when (qualified.mode) { CalendarPeriodMode.CURRENT -> "0"; CalendarPeriodMode.PREVIOUS -> "-1"; CalendarPeriodMode.NEXT -> "1"; else -> "?" }) != adjectiveWeek) -> "?"
+                adjectiveWeek != null -> adjectiveWeek
                 qualified == null -> if (absolute != null) "any" else "0"
                 qualified.unit != CalendarPeriodUnit.WEEK || qualified.count != 1 -> "?"
                 qualified.mode == CalendarPeriodMode.CURRENT -> "0"

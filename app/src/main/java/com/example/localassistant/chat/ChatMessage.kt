@@ -31,6 +31,11 @@ data class ChatMessage(
     val text: String,
     val status: MessageStatus = MessageStatus.COMPLETE,
     val createdAt: Long = System.currentTimeMillis(),
+    val documentRelated: Boolean = false,
+    val documentSources: List<ChatDocumentSource> = emptyList(),
+    val documentSnapshot: DocumentAnswerSnapshot? = null,
+    val fullAnswerFor: Long? = null,
+    val calendarRelated: Boolean = false,
 )
 
 /**
@@ -38,4 +43,8 @@ data class ChatMessage(
  * Failed, interrupted and completed messages offer no continuation.
  */
 val ChatMessage.isContinuable: Boolean
-    get() = role == Role.ASSISTANT && status == MessageStatus.TRUNCATED && text.isNotBlank()
+    get() = role == Role.ASSISTANT && !documentRelated && !calendarRelated && status == MessageStatus.TRUNCATED && text.isNotBlank()
+
+val ChatMessage.isPrimaryDocumentAnswer: Boolean
+    get() = role == Role.ASSISTANT && documentRelated && status == MessageStatus.COMPLETE &&
+        fullAnswerFor == null && documentSnapshot != null && documentSources.isNotEmpty()

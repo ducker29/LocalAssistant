@@ -9,7 +9,41 @@
 - OpenCode CLI запускается из корня проекта в терминале Android Studio.
 
 ## Не определено
+
+Актуальное дополнение2026-11-02: auto-route заменён на explicit Switch OFF/ON, primary short
+и Full по persisted original snapshot; raw dump убран. Calendar Unicode boundaries/qualifiers
+всех7 weekdays исправлены. assembleDebug/308 targeted tests/lintDebug PASS34с.
+Device и real Qwen/Calendar приёмка впереди; новый APK не установлен.
 Модель телефона, RAM, версия ОС, minSdk, package name, точные версии библиотек, embedding-модель, размер базы, финальная Whisper-модель. Не выдумывать значения: сверить с проектом и пользователем.
+
+## Уточнение документной библиотеки — 2026-11-02
+
+- Лобби с режимами Чат/Хранилище реализовано и принято пользователем.
+- Импорт DOCX/XLSX, приватное хранение, извлечение и просмотр реализованы; сборка и
+  6 targeted parser tests (включая 4 примера) PASS. Ручная приёмка библиотеки впереди.
+- DOCX изображения игнорировать. PDF/OCR отложены. Ориентир — десятки файлов;
+  примеры также включают XLSX с тысячами строк и большим числом пустых оформленных ячеек.
+- Начальный кандидат embeddings — multilingual-e5-small; runtime/артефакт ещё проверить.
+- Host-проверка выявила positional shift стороннего Q8 GGUF. По согласию создан posfix
+  artifact с official positions512x384; остальные196 tensors byte-identical. Token parity24/24,
+  retrieval3/3 и inference границ510..512 PASS;513 preflight rejected. Подробности/hashes:
+  EMBEDDING_RESEARCH.md. Android embedding runtime/индекса ещё нет.
+  Обновление: отдельный JNI/Kotlin embedding runtime реализован, assembleDebug и6 focused
+  lifecycle tests PASS; production C++ host probe PASS. App owner/model import/UI не
+  подключены, индекс/поиск/RAG ещё не реализованы. Device runtime не проверен.
+  Следующее обновление: index/hybrid/RAG/XLSX plans+arithmetic/UI добавлены в код;
+  проверка не завершена —15/16 tests PASS, subtotal Unicode-case guard FAIL.
+  assemble/lint общего запуска не завершены; критерии этапа пока не закрывать.
+  Актуальный checkpoint: DOCUMENT_SEARCH.md и верх STATE/HANDOFF.
+  Финальное обновление: по согласию исправлен Unicode subtotal guard, повторная команда
+  assembleDebug +16 targeted tests +lintDebug PASS19с. Код этапов готов к ручной приёмке;
+  качество реального поиска/Qwen/calculations и device resources ещё не подтверждены.
+  По явному согласию posfix встроен в APK: generated asset с build-time SHA guard,
+  background verified atomic preparation/reuse. assembleDebug/4 bundle tests/lint/actual
+  APK asset hash PASS; bundled APK164.29MiB ещё не установлен и не проверен на устройстве.
+- После приёмки импорта отдельно согласовать гибридный поиск и ответы с источниками,
+  затем проверяемые фильтры/расчёты/сравнения XLSX. Эти функции пока не реализованы.
+- Старые M4/M5 ниже не считать завершёнными из-за наличия библиотеки документов.
 
 ## Последовательность
 - [x] M0: аудит существующего проекта; чистая сборка, тесты и lint.

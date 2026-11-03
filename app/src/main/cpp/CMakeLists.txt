@@ -30,7 +30,7 @@ set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${LLAMA_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/llama.cpp")
 
-add_library(localassistant SHARED llama_jni.cpp)
+add_library(localassistant SHARED llama_jni.cpp embedding_jni.cpp embedding_runtime.cpp)
 
 target_include_directories(localassistant PRIVATE
         "${LLAMA_DIR}/include"

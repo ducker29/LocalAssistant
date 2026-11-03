@@ -26,6 +26,11 @@ internal class CalendarSession {
         private set
     var selector: CalendarToolRequest? = null
         private set
+    // Last actual read result is distinct from the narrowed set of an active write.
+    var resultSet: List<CalendarEvent> = emptyList()
+        private set
+    var resultSelector: CalendarToolRequest? = null
+        private set
     var uncertainWrite = false
         private set
     var pendingSubject: CalendarFieldPatch? = null
@@ -40,6 +45,8 @@ internal class CalendarSession {
         draft = null
         targets = emptyList()
         selector = null
+        resultSet = emptyList()
+        resultSelector = null
         awaiting = emptySet()
         awaitingAny = false
         uncertainWrite = false
@@ -55,8 +62,13 @@ internal class CalendarSession {
         require(!uncertainWrite || operation in setOf(CalendarOp.READ, CalendarOp.SEARCH)) {
             "Результат предыдущей записи не подтверждён. Сначала проверьте календарь новым поиском."
         }
-        val oldTargets = targets
-        val oldSelector = selector
+        val oldTargets = if (plan.useResultSet) resultSet else targets
+        val oldSelector = if (plan.useResultSet) resultSelector else selector
+        if (plan.useResultSet) {
+            require(plan.transition == CalendarTurnTransition.TARGETS && oldTargets.isNotEmpty()) { "Исходный список больше недоступен. Повторите поиск." }
+            targets = oldTargets
+            selector = oldSelector
+        }
         val base = when (plan.transition) {
             CalendarTurnTransition.NEW -> {
                 val uncertain = uncertainWrite
@@ -186,6 +198,19 @@ internal class CalendarSession {
         require(events.all { it.kind == objectKind }) { "Нельзя смешивать задачи и события в наборе целей." }
         targets = events
         selector = request
+        version++
+    }
+
+    fun rememberReadResults(events: List<CalendarEvent>, request: CalendarToolRequest) {
+        rememberResults(events, request)
+        resultSet = events
+        resultSelector = request
+    }
+
+    /** Only provider-confirmed changes update the reusable result set; never previews. */
+    fun applyWrittenResult(event: CalendarEvent, deleted: Boolean) {
+        resultSet = if (deleted) resultSet.filterNot { it.id == event.id }
+            else resultSet.map { if (it.id == event.id) event else it }
         version++
     }
 

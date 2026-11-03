@@ -51,3 +51,21 @@ Record unfinished work and unverified assumptions. Do not store entire chats or 
 - Dependencies, tool versions, AndroidManifest.xml permissions, and architecture changes still require approval.
 - Execute commands according to permission settings in opencode.json.
 - Commits, pushes, APK installation, and destructive operations require explicit approval.
+
+## Git and device safety
+
+- Never create a commit without my explicit permission in the current task.
+- Never push, force-push, rebase, amend, cherry-pick, revert, reset, clean,
+  stash, or discard changes without my explicit permission.
+- Do not treat "build succeeded", "tests passed", or "task complete" as
+  permission to commit.
+- Before any approved commit, show:
+  - the exact files to be committed;
+  - the proposed commit message;
+  - any related files intentionally left uncommitted.
+- Do not uninstall the app, clear app data, clear app storage, or delete
+  conversations, downloaded models, or Calendar events.
+- Do not connect to, inspect, install on, or run adb commands against a
+  physical device unless I explicitly ask for it in the current task.
+- When a build is ready for verification, provide the APK path and a manual
+  verification checklist instead of installing it yourself.

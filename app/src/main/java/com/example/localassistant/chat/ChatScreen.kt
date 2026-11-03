@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
@@ -65,6 +66,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -102,6 +106,9 @@ import com.example.localassistant.calendar.CalendarToolRequest
 import com.example.localassistant.calendar.CalendarViewModel
 import com.example.localassistant.model.ModelSpec
 import com.example.localassistant.model.ModelStatus
+import com.example.localassistant.documents.StoredDocument
+import com.example.localassistant.documents.DocumentStatus
+import com.example.localassistant.documents.openOriginalDocument
 import com.example.localassistant.voice.VoicePanel
 import com.example.localassistant.voice.VoicePhase
 import com.example.localassistant.voice.VoiceUiState
@@ -118,6 +125,8 @@ fun ChatScreen(
     voice: VoiceUiState,
     calendar: CalendarViewModel,
     onInputChange: (String) -> Unit,
+    onDocumentSearchChange: (Boolean) -> Unit,
+    onFullDocumentAnswer: (Long) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onContinue: (Long) -> Unit,
@@ -151,6 +160,7 @@ fun ChatScreen(
     onCalendarCancel: () -> Unit,
     onCalendarSettingsDismiss: () -> Unit,
     calendarConfigured: Boolean,
+    onBackToLobby: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -391,6 +401,11 @@ fun ChatScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBackToLobby) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "В лобби")
+                    }
+                },
                 title = {
                     Column {
                         Text("Локальный ассистент", style = MaterialTheme.typography.titleMedium)
@@ -421,6 +436,14 @@ fun ChatScreen(
                 .padding(innerPadding)
                 .imePadding(),
         ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Поиск по документам", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(checked = state.documentSearchEnabled, onCheckedChange = onDocumentSearchChange,
+                    enabled = !state.isGenerating,
+                    colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF34C759),
+                        checkedBorderColor = Color.Transparent, uncheckedThumbColor = Color.White,
+                        uncheckedTrackColor = Color(0xFFB8BCC4), uncheckedBorderColor = Color.Transparent))
+            }
             MessageList(
                 messages = state.messages,
                 isGenerating = state.isGenerating,
@@ -430,6 +453,13 @@ fun ChatScreen(
                     .fillMaxWidth(),
                 onCopy = copyToClipboard,
                 onContinue = onContinue,
+                documentSearchEnabled = state.documentSearchEnabled,
+                onFullDocumentAnswer = onFullDocumentAnswer,
+                onOpenSource = { source -> scope.launch {
+                    val error = openOriginalDocument(context, StoredDocument(source.documentId, source.documentName,
+                        source.format, 0, 0, DocumentStatus.READY))
+                    if (error != null) snackbarHostState.showSnackbar(error, withDismissAction = true)
+                } },
             )
 
             if (state.droppedTurns > 0) {
@@ -540,6 +570,9 @@ private fun MessageList(
     modifier: Modifier = Modifier,
     onCopy: (String) -> Unit,
     onContinue: (Long) -> Unit,
+    documentSearchEnabled: Boolean,
+    onFullDocumentAnswer: (Long) -> Unit,
+    onOpenSource: (ChatDocumentSource) -> Unit,
 ) {
     val listState = rememberLazyListState()
 
@@ -625,6 +658,10 @@ private fun MessageList(
                 isContinuing = continuationMessageId == message.id,
                 onCopy = onCopy,
                 onContinue = onContinue,
+                showFullAnswer = documentSearchEnabled && message.isPrimaryDocumentAnswer &&
+                    messages.none { it.fullAnswerFor == message.id && it.status == MessageStatus.COMPLETE },
+                onFullDocumentAnswer = onFullDocumentAnswer,
+                onOpenSource = onOpenSource,
             )
         }
     }
@@ -637,6 +674,9 @@ private fun MessageBubble(
     isContinuing: Boolean,
     onCopy: (String) -> Unit,
     onContinue: (Long) -> Unit,
+    showFullAnswer: Boolean,
+    onFullDocumentAnswer: (Long) -> Unit,
+    onOpenSource: (ChatDocumentSource) -> Unit,
 ) {
     val isUser = message.role == Role.USER
     Column(
@@ -653,6 +693,7 @@ private fun MessageBubble(
             modifier = Modifier.widthIn(max = 340.dp),
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                if (message.documentRelated && !isUser) Text("По документам", style = MaterialTheme.typography.labelSmall)
                 if (message.text.isBlank() && message.status == MessageStatus.STREAMING) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(
@@ -677,6 +718,11 @@ private fun MessageBubble(
                     MessageStatus.FAILED -> StatusLine("Ошибка", error = true)
                     else -> Unit
                 }
+                message.documentSources.forEach { source ->
+                    TextButton(onClick = { onOpenSource(source) }) {
+                        Text("Открыть источник: ${source.location}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
         }
         if (!isUser && message.text.isNotBlank() && message.status != MessageStatus.STREAMING) {
@@ -686,6 +732,12 @@ private fun MessageBubble(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                 ) {
                     Text("Копировать", style = MaterialTheme.typography.labelSmall)
+                }
+                if (showFullAnswer) {
+                    TextButton(onClick = { onFullDocumentAnswer(message.id) }, enabled = !isGenerating,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Text("Полный ответ", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
                 if (message.isContinuable) {
                     TextButton(

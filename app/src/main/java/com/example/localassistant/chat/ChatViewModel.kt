@@ -36,6 +36,7 @@ data class ChatUiState(
     val error: String? = null,
     /** Assistant message currently being continued, if any. */
     val continuationMessageId: Long? = null,
+    val documentSearchEnabled: Boolean = false,
 ) {
     val canSend: Boolean
         get() = input.isNotBlank() && model is ModelStatus.Ready && !isGenerating
@@ -46,6 +47,7 @@ class ChatViewModel(
     private val repository: ModelGateway,
     private val conversationStore: ConversationPersistence,
     private val calendar: CalendarViewModel? = null,
+    private val documents: DocumentChatGateway? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ChatUiState())
@@ -53,6 +55,7 @@ class ChatViewModel(
 
     private var generationJob: Job? = null
     private var cancelRequested = false
+    private var documentRequestId: Long? = null
     private var nextId = 1L
 
     init {
@@ -93,6 +96,11 @@ class ChatViewModel(
         _state.update { it.copy(error = null) }
     }
 
+    fun setDocumentSearchEnabled(enabled: Boolean) {
+        if (_state.value.isGenerating) return
+        _state.update { it.copy(documentSearchEnabled = enabled) }
+    }
+
     fun send() {
         val snapshot = _state.value
         val text = snapshot.input.trim()
@@ -102,14 +110,19 @@ class ChatViewModel(
             _state.update { it.copy(error = "Сначала подготовьте модель") }
             return
         }
+        if (snapshot.documentSearchEnabled && documents == null) {
+            _state.update { it.copy(error = "Поиск по документам недоступен") }
+            return
+        }
 
-        val userMessage = ChatMessage(id = nextId++, role = Role.USER, text = text)
+        val userMessage = ChatMessage(id = nextId++, role = Role.USER, text = text, documentRelated = snapshot.documentSearchEnabled)
         val assistantId = nextId++
         val placeholder = ChatMessage(
             id = assistantId,
             role = Role.ASSISTANT,
             text = "",
             status = MessageStatus.STREAMING,
+            documentRelated = snapshot.documentSearchEnabled,
         )
         cancelRequested = false
         _state.update {
@@ -124,7 +137,14 @@ class ChatViewModel(
         }
         persist()
 
+        if (snapshot.documentSearchEnabled) documentRequestId = assistantId
         generationJob = viewModelScope.launch {
+            // OFF must never call a router, inspect an index or access document services.
+            if (snapshot.documentSearchEnabled) {
+                runDocumentReply(text, snapshot.messages, userMessage.id, assistantId)
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
             val startedAt = System.nanoTime()
             fun elapsedMs() = (System.nanoTime() - startedAt) / 1_000_000
             val nativeContext = (snapshot.model as ModelStatus.Ready).contextTokens
@@ -134,18 +154,21 @@ class ChatViewModel(
             CalendarAssistantDebug.log(calId, "planner entered: calendarAttached=${calendar != null}")
             val plannerOutcome = runPlanner(text, calId)
             if (plannerOutcome is PlannerOutcome.Cancelled) {
+                markCalendarTurn(userMessage.id, assistantId)
                 finishMessage(assistantId, MessageStatus.INTERRUPTED, "Остановлено")
                 _state.update { it.copy(isGenerating = false) }
                 persist()
                 return@launch
             }
             if (plannerOutcome is PlannerOutcome.Failed) {
+                markCalendarTurn(userMessage.id, assistantId)
                 finishMessage(assistantId, MessageStatus.COMPLETE, plannerOutcome.message)
                 _state.update { it.copy(isGenerating = false) }
                 persist()
                 return@launch
             }
             if (plannerOutcome is PlannerOutcome.ToolCall) {
+                markCalendarTurn(userMessage.id, assistantId)
                 val command = plannerOutcome.command
                 CalendarAssistantDebug.log(calId, "dispatch: object_kind=${command.plan.objectKind}, app_operation=${command.plan.operation}, transition=${command.plan.transition}, fields=${command.patch.values.keys.map { it.wire }}")
                 val result = runCalendarTool(command, calId)
@@ -415,11 +438,19 @@ class ChatViewModel(
     fun stopGeneration() {
         if (!_state.value.isGenerating) return
         cancelRequested = true
+        if (documentRequestId != null) {
+            documents?.cancel()
+            engine.cancelGeneration()
+            generationJob?.cancel()
+            return
+        }
         calendar?.clearToolContext()
         engine.cancelGeneration()
     }
 
     fun newChat() {
+        if (documentRequestId != null) documents?.cancel()
+        documentRequestId = null
         engine.cancelGeneration()
         generationJob?.cancel()
         calendar?.clearToolContext()
@@ -434,6 +465,7 @@ class ChatViewModel(
                     droppedTurns = 0,
                     error = null,
                     continuationMessageId = null,
+                    documentSearchEnabled = false,
                 )
             }
         }
@@ -478,7 +510,68 @@ class ChatViewModel(
         viewModelScope.launch { conversationStore.save(snapshot) }
     }
 
+    fun requestFullDocumentAnswer(shortAnswerId: Long) {
+        val current = _state.value
+        if (!current.documentSearchEnabled || current.isGenerating) return
+        if (current.model !is ModelStatus.Ready) { _state.update { it.copy(error = "Сначала подготовьте модель") }; return }
+        val original = current.messages.firstOrNull { it.id == shortAnswerId && it.isPrimaryDocumentAnswer } ?: return
+        val snapshot = original.documentSnapshot ?: return
+        if (current.messages.any { it.fullAnswerFor == shortAnswerId && it.status == MessageStatus.COMPLETE }) return
+        val retry = current.messages.lastOrNull { it.fullAnswerFor == shortAnswerId && it.status in setOf(MessageStatus.FAILED, MessageStatus.INTERRUPTED) }
+        val id = retry?.id ?: nextId++
+        val placeholder = ChatMessage(id, Role.ASSISTANT, "Собираю полный ответ…", MessageStatus.STREAMING,
+            documentRelated = true, fullAnswerFor = shortAnswerId)
+        _state.update { it.copy(messages = if (retry == null) it.messages + placeholder else it.messages.map { m -> if (m.id == id) placeholder else m },
+            isGenerating = true, error = null, continuationMessageId = null) }
+        cancelRequested = false
+        documentRequestId = id
+        persist()
+        generationJob = viewModelScope.launch { runDocumentReply(snapshot.question, emptyList(), null, id, snapshot) }
+    }
+
+    /** Only explicit document mode reaches here; calendar session is never prepared or mutated. */
+    private suspend fun runDocumentReply(text: String, history: List<ChatMessage>, userId: Long?, assistantId: Long, snapshot: DocumentAnswerSnapshot? = null) {
+        try {
+            val gateway = documents ?: error("Поиск по документам недоступен")
+            val progress: (String) -> Unit = { progress ->
+                if (documentRequestId == assistantId) updateMessageText(assistantId, progress)
+            }
+            val reply = if (snapshot == null) gateway.answer(text, history, progress) else gateway.fullAnswer(snapshot, progress)
+            currentCoroutineContext().ensureActive()
+            if (documentRequestId == assistantId) {
+                _state.update { current -> current.copy(messages = current.messages.map { message ->
+                    when (message.id) {
+                        userId -> message.copy(documentRelated = true)
+                        assistantId -> message.copy(text = reply.text, status = MessageStatus.COMPLETE,
+                            documentRelated = true, documentSources = reply.sources, documentSnapshot = reply.snapshot)
+                        else -> message
+                    }
+                }) }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (documentRequestId == assistantId) finishMessage(assistantId, MessageStatus.INTERRUPTED, "Обращение к документам остановлено.")
+            throw e
+        } catch (e: Exception) {
+            if (documentRequestId == assistantId) finishMessage(assistantId, MessageStatus.FAILED,
+                e.message?.take(1000) ?: "Не удалось обратиться к документам. Уточните запрос.")
+        } catch (_: LinkageError) {
+            if (documentRequestId == assistantId) finishMessage(assistantId, MessageStatus.FAILED, "Native runtime поиска недоступен в этой сборке")
+        } finally {
+            if (documentRequestId == assistantId) {
+                documentRequestId = null
+                _state.update { it.copy(isGenerating = false) }
+                persist()
+            }
+        }
+    }
+
     /** Result of the planner pass. */
+    private fun markCalendarTurn(userId: Long, assistantId: Long) {
+        _state.update { state -> state.copy(messages = state.messages.map { message ->
+            if (message.id == userId || message.id == assistantId) message.copy(calendarRelated = true) else message
+        }) }
+    }
+
     sealed interface PlannerOutcome {
         data object Cancelled : PlannerOutcome
         data class Failed(val message: String) : PlannerOutcome
@@ -493,6 +586,8 @@ class ChatViewModel(
     private suspend fun runPlanner(userText: String, calId: String): PlannerOutcome {
         val cal = calendar
         if (cal == null) {
+            if (com.example.localassistant.calendar.CalendarTurnPolicy.hasWriteIntent(userText))
+                return PlannerOutcome.Failed("Календарь недоступен. Изменение не выполнено; подключите календарь и уточните событие и действие.")
             CalendarAssistantDebug.log(calId, "planner skipped: calendar_not_attached")
             return PlannerOutcome.None
         }
@@ -502,7 +597,10 @@ class ChatViewModel(
         CalendarAssistantDebug.log(calId, "turn: object_kind=${turn.objectKind}, app_operation=${turn.operation}, transition=${turn.transition}, task_id=${turn.taskId}, version=${turn.version}")
         when (turn.transition) {
             CalendarTurnTransition.GENERAL -> {
-                cal.clearToolContext()
+                if (com.example.localassistant.calendar.CalendarTurnPolicy.hasWriteIntent(userText))
+                    return PlannerOutcome.Failed("Уточните событие и действие. Изменение календаря ещё не выполнено.")
+                // A general chat reply is not cancellation of an unfinished Calendar action.
+                // Only an explicit new Calendar action/cancel/new chat/account reset replaces it.
                 return PlannerOutcome.None
             }
             CalendarTurnTransition.CANCEL -> {
@@ -610,6 +708,7 @@ class ChatViewModel(
     private fun buildTurns(messages: List<ChatMessage>): List<List<PromptMessage>> {
         val turns = ArrayList<MutableList<PromptMessage>>()
         for (message in messages) {
+            if (message.documentRelated || CalendarChatSafety.excludeFromOrdinaryPrompt(message)) continue
             if (message.text.isBlank()) continue
             if (message.status != MessageStatus.COMPLETE) continue
             val prompt = PromptMessage(message.role.wireName, message.text)
@@ -628,10 +727,11 @@ class ChatViewModel(
         private val repository: ModelGateway,
         private val conversationStore: ConversationPersistence,
         private val calendar: CalendarViewModel? = null,
+        private val documents: DocumentChatGateway? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return ChatViewModel(engine, repository, conversationStore, calendar) as T
+            return ChatViewModel(engine, repository, conversationStore, calendar, documents) as T
         }
     }
 
@@ -639,7 +739,9 @@ class ChatViewModel(
         private const val TAG = "ChatViewModel"
         private const val SYSTEM_PROMPT =
             "Ты — локальный ассистент на смартфоне. Отвечай ясно, по существу и на языке " +
-                "пользователя. Если не знаешь ответа — скажи об этом прямо."
+                "пользователя. Если не знаешь ответа — скажи об этом прямо. " +
+                "В этом режиме ты не изменяешь календарь и не выполняешь внешние действия. " +
+                "Не имитируй отчёты о создании, переносе или удалении событий. Если просят такое действие, попроси уточнить запрос."
 
         /** Hard cap on the output budget in tokens (spec: min(1024, available)). */
         const val CAP_TOKENS = 1024

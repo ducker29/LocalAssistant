@@ -19,13 +19,26 @@ import com.example.localassistant.llm.LlamaEngine
 import com.example.localassistant.llm.LlmEngine
 import com.example.localassistant.model.ModelRepository
 import com.example.localassistant.model.ModelStore
+import com.example.localassistant.documents.DocumentSearchService
+import com.example.localassistant.documents.DocumentLlm
+import com.example.localassistant.documents.DocumentRepository
+import com.example.localassistant.chat.IndexedDocumentChat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Single process-wide holder for the inference engines. Keeping them here prevents duplicate
  * model loads when the activity is recreated and lets the app react to memory pressure.
  */
 class AppContainer(context: Context) {
+    private val background = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val documentSearch = DocumentSearchService(context.contentResolver, context.filesDir, context.assets)
+    fun releaseDocumentEngine() { documentSearch.cancel(); background.launch { documentSearch.release() } }
     val engine: LlmEngine = LlamaEngine()
+    val documentLlm = DocumentLlm(engine)
+    val documentChat = IndexedDocumentChat(documentSearch, DocumentRepository(context.contentResolver, context.filesDir), documentLlm)
     val conversationStore = ConversationStore(context.filesDir)
     val modelStore = ModelStore(context.filesDir)
     val modelRepository = ModelRepository(modelStore, engine, context.contentResolver)
@@ -69,6 +82,7 @@ class LocalAssistantApp : Application(), ComponentCallbacks2 {
             // The recogniser is only needed while the user is speaking; drop it first when
             // the system asks for memory. It is reloaded lazily before the next recording.
             container.whisperRepository.releaseEngine()
+            container.releaseDocumentEngine()
         }
     }
 }

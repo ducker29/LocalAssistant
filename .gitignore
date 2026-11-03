@@ -54,3 +54,7 @@ secrets.properties
 *.flac
 *.ogg
 *.aac
+
+# Local document fixtures (may contain private content)
+/doc_examples/
+/screenshots/

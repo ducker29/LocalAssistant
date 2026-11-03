@@ -249,6 +249,10 @@ bool is_cancelled(JNIEnv * env, jobject cancel, jmethodID get_id) {
 
 } // namespace
 
+void localassistant_backend_init_once() {
+    backend_init_once();
+}
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL

@@ -64,6 +64,8 @@ data class CalendarTurnPlan(
     val objectKind: CalendarObjectKind = CalendarObjectKind.EVENT,
     val taskListsOnly: Boolean = false,
     val taskStatusFilter: GoogleTaskStatus? = null,
+    val useResultSet: Boolean = false,
+    val clarificationFields: Set<CalendarField> = emptySet(),
 )
 
 data class CalendarModelPatch(val taskId: Long, val version: Long, val patch: CalendarFieldPatch)
