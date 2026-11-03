@@ -1,5 +1,20 @@
 # Последовательные изменения разных событий
 
+## Удаление по названию из показанного дня (2026-11-03)
+
+Пользователь сообщил false-not-found при named DELETE сразу после READ дня. В коде
+выборка переиспользовалась только дляUPDATE; DELETE создавалNEW сdefault range и терялдень.
+Before-fix test подтвердилmissing result-set binding. Scoped DELETE без новойsourceDate
+теперьиспользует original resultSet/selector. Unknown title в нём →clarification, не расширение
+поиска на другойдень; explicit новаяdate разрешает новыйscope. Пустаявыборка послеdelete
+неподменяется одноимённойзаписью другого дня. Confirmation/stale checks/real API IDs unchanged.
+CalendarDeleteReadSetTest8 проверяет4 разныхsynthetic titles, pastday, future namesake,
+cancel/retry, unknown source title, explicit dateoverride, repeat, ambiguouschoice иstale record.
+Восемьновых+460прежних:468tests PASS,assembleDebug/lintDebug PASS9с. Wrong testError expectation
+заменён наactualClarification+точныйmessage иassertnoDelete. Production guard не ослаблялся.
+APK затем установлен по прямому запросу на CPH2581 через adb install -r — Success, данные сохранены.
+Google Calendar/личные события не читались; следующий шаг — ручная проверка удаления из показанного списка.
+
 ## Продолжение: pending action и перенос между днями (2026-11-03)
 
 Пользователь сообщил redundant time clarification и потерю действия при коротком ответе;

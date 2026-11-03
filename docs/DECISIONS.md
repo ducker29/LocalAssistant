@@ -500,6 +500,18 @@ Date-only сохраняет actual old time/duration; date+time поддерж�
 Альтернатива раннему CLARIFY без draft отклонена как причина потери действия; угадывание
 relative shift/длительности отклонено. Полный synthetic workflow460PASS, device QA впереди.
 
+## D038 — Named DELETE использует original read-set до явной смены source date (2026-11-03)
+
+Статус: user разрешил проверку/fix,assembleDebug/468targeted tests/lintDebug PASS9с.
+Исходный useResultSet былUPDATE-only; named DELETE послеREAD терялконтекстдня. Общее
+scopedDelete rule безliteral names удерживает original set/day, включая retry послеclarify.
+Explicit sourceDate может заменитьscope; пустой set послеdelete вызываетclarification,
+неdefault lookup будущего namesake. Selection,provider refetch/stale check,confirmation и
+API-success report не обходятся. Тесты8 synthetic scenarios плюс460 прежних PASS.
+Alternative fallback кdefault range отклонён как риск выборадругой одноимённойзаписи.
+Live Calendar не читался; APK установлен на CPH2581 с сохранением данных по прямому запросу.
+Пользователь разрешил отдельный коммит исправления относительно f21873d; ручная приёмка впереди.
+
 ## Формат нового решения
 ID и дата; статус (предложено/принято/заменено); контекст; решение; альтернативы; последствия; способ проверки.
 Не удалять старые решения: помечать заменёнными с указанием нового ID.

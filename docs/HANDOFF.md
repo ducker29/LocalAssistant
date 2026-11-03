@@ -1,5 +1,22 @@
 # Передача контекста проекта
 
+## АКТУАЛЬНО — удаление из original read-set PASS, 2026-11-03
+
+Новый user bug: после READ конкретного дня named DELETE не находит показанное событие.
+Причина вCalendarTurnPolicy: original result-set reuse был толькоUPDATE, DELETE уходилNEW
+и терялдень. До fix один targeted test ожидаемоFAIL. scopedDelete теперьвключаетDELETE
+без explicit новой sourceDate и сохраняет исходный set/day даже при повторе послеclarification.
+Пустой source set → app clarify, неdefault search к будущему namesake. НоваяsourceDate override.
+Никаких literal user titles в production/fixtures/docs. ID refetch/stale validation/selection/
+confirmation unchanged. New CalendarDeleteReadSetTest8+13 previous suites=468tests PASS,
+assembleDebug/lintDebug PASS9с. Один initial stale test ожидалError вместоactualClarification;
+expectation исправлен точно, assertnoAPIdelete сохранён. Подготовлен отдельный коммит по
+прямому запросу пользователя; предыдущая база f21873d. calendar-auth.log не включать.
+APK app/build/outputs/apk/debug/app-debug.apk установлен по прямому запросу на CPH2581:
+`adb -s 2d46124b install -r app/build/outputs/apk/debug/app-debug.apk` — Success, данные сохранены.
+После expected-red диагностического запуска сразу переходить к уже согласованному fix/retry,
+пользователь просит не оставаться наBUILDFAILED без продолжения. Live Google/device не трогали.
+
 ## Checkpoint перед общим коммитом (2026-11-03)
 
 Пользователь явно запросил общий commit накопленных изменений. Scope: все безопасные

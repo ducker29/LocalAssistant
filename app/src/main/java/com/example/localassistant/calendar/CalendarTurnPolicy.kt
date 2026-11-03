@@ -345,9 +345,18 @@ internal object CalendarTurnPolicy {
             ).matches(query)))) {
             return plan(CalendarTurnTransition.CLARIFY, message = "Укажите название события из предыдущего списка и новое время. Изменение ещё не выполнено.")
         }
-        val useResultSet = kind == CalendarTurnTransition.NEW && operation == CalendarOp.UPDATE &&
+        // A named deletion after READ refers to that displayed set/day, not a fresh
+        // default-range search. A new explicit source date deliberately replaces this scope.
+        val scopedDelete = kind == CalendarTurnTransition.NEW && operation == CalendarOp.DELETE &&
+            session.draft?.op in setOf(null, CalendarOp.DELETE) && objectKind == session.objectKind &&
+            session.resultSelector != null && CalendarField.SOURCE_DATE !in values && !query.isNullOrBlank()
+        if (scopedDelete && session.resultSet.isEmpty()) {
+            return plan(CalendarTurnTransition.CLARIFY, message =
+                "В предыдущем списке больше нет доступных записей. Укажите другую дату или выполните новый поиск. Удаление не выполнено.")
+        }
+        val useResultSet = scopedDelete || (kind == CalendarTurnTransition.NEW && operation == CalendarOp.UPDATE &&
             session.draft == null && objectKind == session.objectKind && CalendarField.SOURCE_DATE !in values &&
-            !query.isNullOrBlank() && session.resultSet.any { CalendarEventSearch.matches(it, query, titleOnly = true) }
+            !query.isNullOrBlank() && session.resultSet.any { CalendarEventSearch.matches(it, query, titleOnly = true) })
         return plan(if (useResultSet) CalendarTurnTransition.TARGETS else kind, finalOp.takeUnless { subjectOnly }, CalendarFieldPatch((inherited + values).filterKeys { it !in taskClears }, clears + taskClears), all)
             .copy(usesPendingSubject = useSubject, titleQuery = rename != null && operation == CalendarOp.UPDATE,
                 objectKind = objectKind, taskListsOnly = listsOnly, taskStatusFilter = statusFilter, useResultSet = useResultSet,

@@ -1,5 +1,23 @@
 # Текущее состояние проекта
 
+## АКТУАЛЬНО: named DELETE после READ (2026-11-03)
+
+- Установлена потеря original read-set/day: useResultSet работал только для UPDATE.
+  Новый synthetic before-fix test воспроизвёл отсутствие scope у DELETE (ожидаемый red).
+- CalendarTurnPolicy scopedDelete сохраняет original read-set для named DELETE без новой
+  sourceDate; поддержан повтор после уточнения. Новый explicit sourceDate начинает новый поиск.
+  Пустой read-set даёт уточнение, не поиск одноимённого события другого дня.
+- Только общий scope rule, без привязки к пользовательскому названию. Executor ID freshness,
+  выбор при неоднозначности и confirmation/API delete оставлены обязательными.
+- CalendarDeleteReadSetTest8 +13 прежних suites:468 tests/0failures/errors/skips;
+  assembleDebug/lintDebug PASS9с. В новом stale-record test исправлен exact expected result
+  Clarification вместо Error; отсутствие deletion/записи проверяется, защита не ослаблена.
+- APK установлен по прямому запросу на CPH2581:
+  `adb -s 2d46124b install -r app/build/outputs/apk/debug/app-debug.apk` — Success, данные сохранены.
+  Google Calendar не читался; следующий шаг — manual READ day→named delete→confirmation.
+- Пользователь явно разрешил отдельный коммит этого исправления относительно f21873d;
+  calendar-auth.log оставить локально. Ручная приёмка установленной сборки ещё не получена.
+
 ## Запрос на общий локальный коммит (2026-11-03)
 
 - Пользователь явно разрешил коммит всех накопленных изменений. Включить source/tests,
