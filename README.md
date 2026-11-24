@@ -2,7 +2,9 @@
 
 LocalAssistant is an Android AI assistant for local chat, personal document search, and Google Calendar. Core AI features work offline once the models and documents are ready. Google Calendar requires a connection for account setup and synchronization.
 
-![LocalAssistant feature overview for Android](docs/Local_AI_Assistant_Android.en.png)
+<img src="docs/Local_AI_Assistant_Android.en.png"
+     alt="LocalAssistant feature overview for Android"
+     width="543">
 
 ## Features
 
