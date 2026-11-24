@@ -1,0 +1,100 @@
+LOCALASSISTANT
+Your personal AI assistant for Android
+
+
+1. PRODUCT, MODES, AND BENEFITS
+
+LocalAssistant is an Android app that brings AI chat, personal documents, and calendar management together. It helps you find information, make sense of it, and handle everyday tasks in one place.
+
+The AI generates responses on your device without sending your prompts to a cloud model. After initial setup, core AI features work without a constant internet connection. Connecting and syncing Google Calendar requires internet access.
+
+The app has two modes.
+
+CHAT — CONVERSATION AND EVERYDAY TASKS
+
+Use regular chat to ask questions, get explanations and writing help, or work with your connected Google Calendar. Type or dictate your requests.
+
+Calendar features:
+• View events on a specific date, today, tomorrow, or another relative date range.
+• Ask about days of the week and the current, previous, or next week.
+• Find events by title.
+• Create, reschedule, or delete events after confirming the changes.
+• Clarify missing details in an ongoing conversation before completing an action.
+
+Chat history is saved, and you can copy text responses for later use.
+
+DOCUMENT SEARCH — ANSWERS BASED ON YOUR FILES
+
+Use the Library to import DOCX documents and XLSX spreadsheets. Once processed, they become searchable. You can open the original files in a compatible app installed on your phone.
+
+Use the Document Search switch in the main chat to direct questions to your imported files. Turn it off to return to regular chat and calendar workflows.
+
+In document mode you can:
+• Search by meaning even when your question uses different words from the source.
+• Get a short answer with citations.
+• Use the Full Answer button for a more detailed explanation.
+• Open originals directly from an answer.
+• Look up values in spreadsheets and run supported numerical calculations.
+
+USER BENEFITS
+
+• One interface for chat, documents, and calendar tasks.
+• On-device AI responses without a required cloud inference service.
+• Offline access to prepared documents.
+• Easy switching between regular chat and document search.
+• Source links to verify the information you find.
+• Confirmation before changes are made to your calendar.
+• Voice input when typing is inconvenient.
+
+
+2. CURRENT STATUS AND PLANNED TEXT-TO-SPEECH
+
+LocalAssistant is a working pilot for testing real-world workflows. The Android app includes text chat, voice input, Google Calendar integration, a document library, and search across imported files.
+
+Document answers can be brief or detailed. You can open the source files and perform basic spreadsheet operations. These features continue to evolve based on usage.
+
+Work on complex spreadsheets focuses on separating headers from data, excluding text values from calculations, and retaining the selected file, sheet, and column during follow-up questions. Check complex spreadsheet results against the original until these improvements are complete.
+
+PLANNED FEATURE — TEXT-TO-SPEECH
+
+The next feature under consideration is reading text responses aloud while keeping them visible in the conversation.
+
+The proposed workflow includes:
+• Automatic narration once enabled in settings.
+• Support for regular chat and document search.
+• Preservation of text responses in chat history.
+• Replay and stop controls.
+• Sequential narration for longer responses.
+
+On-device speech synthesis is preferred so responses can be read aloud without sending the text to an external speech service. Voice selection, audio quality, and speed will be evaluated on a phone.
+
+Voice input is already available. Text-to-speech is still being evaluated and has no scheduled release date.
+
+
+3. DEVICE REQUIREMENTS AND OPERATING CONDITIONS
+
+OPERATING SYSTEM
+Android 8.0 or later. For everyday use, a modern phone with up-to-date system software is preferable.
+
+PROCESSOR
+A 64-bit ARM processor. Faster processors reduce response times and speed up document preparation.
+
+MEMORY
+The preliminary recommendation is at least 8 GB of RAM. For longer conversations and larger documents, 12 GB or more provides additional headroom. Devices with less memory require further testing.
+
+FREE STORAGE
+The preliminary recommendation is at least 4 GB of free space for the app and its required components. Imported documents and their processing require additional space. The total depends on the installed components and the size of your library.
+
+INTERNET
+Internet access is needed to download required components when they are not bundled with the app and to connect to and use Google Calendar. Prepared local AI features do not require a constant connection.
+
+ADDITIONAL REQUIREMENTS
+• For Calendar, a Google account and authorization to connect it.
+• For voice input, a working microphone and microphone permission.
+• For opening original DOCX and XLSX files, a compatible app.
+• For future text-to-speech, a speaker or headphones. Additional storage requirements will be determined when the voice is selected.
+
+PERFORMANCE
+Speed depends on the phone, the length of the question and answer, and the size of the documents. Preparing a large library for the first time takes longer than later searches. Sustained intensive use can increase battery drain and device temperature.
+
+Memory and storage recommendations are preliminary. Supported phone models and requirements for future text-to-speech will be refined during pilot testing.
